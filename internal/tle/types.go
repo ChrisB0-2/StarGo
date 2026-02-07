@@ -20,7 +20,7 @@ type EpochRange struct {
 // TLEDataset represents a complete set of TLE data from a source.
 type TLEDataset struct {
 	Source     string
-	FetchedAt time.Time
+	FetchedAt  time.Time
 	EpochRange EpochRange
 	Satellites []TLEEntry
 }
