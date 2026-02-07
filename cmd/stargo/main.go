@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -13,6 +14,8 @@ import (
 
 	"github.com/star/stargo/internal/api"
 	"github.com/star/stargo/internal/auth"
+	"github.com/star/stargo/internal/metrics"
+	"github.com/star/stargo/internal/tle"
 )
 
 func main() {
@@ -31,14 +34,69 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := api.NewServer(addr, logger, authCfg)
+	tleCfg := loadTLEConfig(logger)
+	store := tle.NewStore()
+	cache := tle.NewCache(tleCfg.CacheDir, tleCfg.MaxFiles)
+
+	// Attempt to load cached TLE data on startup.
+	data, ts, err := cache.LoadLatest()
+	if err != nil {
+		logger.Info("no TLE cache found, starting without TLE data", "error", err)
+	} else {
+		entries, err := tle.Parse(bytes.NewReader(data))
+		if err != nil {
+			logger.Warn("failed to parse cached TLE data", "error", err)
+		} else if len(entries) > 0 {
+			minEpoch := entries[0].Epoch
+			maxEpoch := entries[0].Epoch
+			for _, e := range entries[1:] {
+				if e.Epoch.Before(minEpoch) {
+					minEpoch = e.Epoch
+				}
+				if e.Epoch.After(maxEpoch) {
+					maxEpoch = e.Epoch
+				}
+			}
+
+			store.Set(&tle.TLEDataset{
+				Source:    "cache",
+				FetchedAt: ts,
+				EpochRange: tle.EpochRange{
+					Min: minEpoch,
+					Max: maxEpoch,
+				},
+				Satellites: entries,
+			})
+			metrics.SetTLEDatasetCount(len(entries))
+			logger.Info("loaded TLE data from cache", "count", len(entries), "cached_at", ts.Format(time.RFC3339))
+		}
+	}
+
+	srv := api.NewServer(addr, logger, authCfg, store, tleCfg)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Background goroutine to update TLE dataset age gauge.
 	go func() {
-		logger.Info("starting server", "addr", addr, "auth_enabled", authCfg.Enabled)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				age := store.AgeSeconds()
+				if age >= 0 {
+					metrics.SetTLEDatasetAge(age)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		logger.Info("starting server", "addr", addr, "auth_enabled", authCfg.Enabled, "tle_fetch_enabled", tleCfg.EnableFetch)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server listen error", "error", err)
 			os.Exit(1)
@@ -80,4 +138,40 @@ func loadAuthConfig(logger *slog.Logger) (auth.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadTLEConfig(logger *slog.Logger) api.TLEConfig {
+	cfg := api.TLEConfig{
+		CacheDir: "/tmp/stargo/tle",
+		MaxFiles: 5,
+		MaxAge:   24 * time.Hour,
+	}
+
+	if v := os.Getenv("STARGO_ENABLE_TLE_FETCH"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			logger.Warn("invalid STARGO_ENABLE_TLE_FETCH value, defaulting to false", "value", v)
+		} else {
+			cfg.EnableFetch = enabled
+		}
+	}
+
+	if v := os.Getenv("STARGO_TLE_SOURCE_URL"); v != "" {
+		cfg.SourceURL = v
+	}
+
+	if v := os.Getenv("STARGO_TLE_CACHE_DIR"); v != "" {
+		cfg.CacheDir = v
+	}
+
+	if v := os.Getenv("STARGO_TLE_MAX_AGE"); v != "" {
+		seconds, err := strconv.Atoi(v)
+		if err != nil {
+			logger.Warn("invalid STARGO_TLE_MAX_AGE value, defaulting to 86400", "value", v)
+		} else {
+			cfg.MaxAge = time.Duration(seconds) * time.Second
+		}
+	}
+
+	return cfg
 }

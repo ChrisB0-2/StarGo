@@ -26,16 +26,79 @@ var (
 		},
 		[]string{"path", "method"},
 	)
+
+	tleFetchTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stargo_tle_fetch_total",
+			Help: "Total number of TLE fetch operations.",
+		},
+		[]string{"status"},
+	)
+
+	tleFetchDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "stargo_tle_fetch_duration_seconds",
+			Help:    "Duration of TLE fetch operations in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	tleDatasetAgeSeconds = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "stargo_tle_dataset_age_seconds",
+			Help: "Age of the current TLE dataset in seconds.",
+		},
+	)
+
+	tleDatasetCount = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "stargo_tle_dataset_count",
+			Help: "Number of satellites in the current TLE dataset.",
+		},
+	)
+
+	tleParseErrorsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stargo_tle_parse_errors_total",
+			Help: "Total number of TLE parse errors.",
+		},
+	)
 )
 
 func init() {
 	prometheus.MustRegister(httpRequestsTotal)
 	prometheus.MustRegister(httpDurationSeconds)
+	prometheus.MustRegister(tleFetchTotal)
+	prometheus.MustRegister(tleFetchDurationSeconds)
+	prometheus.MustRegister(tleDatasetAgeSeconds)
+	prometheus.MustRegister(tleDatasetCount)
+	prometheus.MustRegister(tleParseErrorsTotal)
 }
 
 // Handler returns the Prometheus metrics HTTP handler.
 func Handler() http.Handler {
 	return promhttp.Handler()
+}
+
+// RecordTLEFetch records a TLE fetch operation with status and duration.
+func RecordTLEFetch(status string, duration time.Duration) {
+	tleFetchTotal.WithLabelValues(status).Inc()
+	tleFetchDurationSeconds.Observe(duration.Seconds())
+}
+
+// SetTLEDatasetAge sets the current TLE dataset age gauge.
+func SetTLEDatasetAge(seconds float64) {
+	tleDatasetAgeSeconds.Set(seconds)
+}
+
+// SetTLEDatasetCount sets the current TLE dataset satellite count gauge.
+func SetTLEDatasetCount(n int) {
+	tleDatasetCount.Set(float64(n))
+}
+
+// IncTLEParseErrors increments the TLE parse error counter.
+func IncTLEParseErrors() {
+	tleParseErrorsTotal.Inc()
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code.

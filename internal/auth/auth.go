@@ -14,9 +14,10 @@ type Config struct {
 
 // exemptPaths are always public regardless of auth configuration.
 var exemptPaths = map[string]bool{
-	"/healthz": true,
-	"/readyz":  true,
-	"/metrics": true,
+	"/healthz":             true,
+	"/readyz":              true,
+	"/metrics":             true,
+	"/api/v1/tle/metadata": true,
 }
 
 // Middleware returns an HTTP middleware that enforces Bearer token auth
