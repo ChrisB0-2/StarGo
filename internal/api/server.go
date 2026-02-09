@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/star/stargo/internal/auth"
+	"github.com/star/stargo/internal/cache"
 	"github.com/star/stargo/internal/health"
 	"github.com/star/stargo/internal/metrics"
 	"github.com/star/stargo/internal/propagation"
+	"github.com/star/stargo/internal/stream"
 	"github.com/star/stargo/internal/tle"
 )
 
@@ -33,7 +35,7 @@ type Server struct {
 }
 
 // NewServer creates a configured HTTP server.
-func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle.Store, tleCfg TLEConfig, prop *propagation.Propagator) *Server {
+func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle.Store, tleCfg TLEConfig, prop *propagation.Propagator, kfCache *cache.KeyframeCache, streamHandler *stream.Handler) *Server {
 	mux := http.NewServeMux()
 
 	checker := health.NewChecker(store, tleCfg.MaxAge)
@@ -53,6 +55,14 @@ func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle
 	mux.HandleFunc("POST /api/v1/tle/fetch", tleFetchHandler(logger, store, fetcher, cache, tleCfg.EnableFetch, rl))
 	if prop != nil {
 		mux.HandleFunc("GET /api/v1/propagate/test", propagateTestHandler(logger, prop))
+	}
+	if kfCache != nil {
+		mux.HandleFunc("GET /api/v1/cache/keyframes/latest", cacheLatestHandler(kfCache))
+		mux.HandleFunc("GET /api/v1/cache/keyframes/at", cacheAtHandler(kfCache))
+		mux.HandleFunc("GET /api/v1/cache/stats", cacheStatsHandler(kfCache))
+	}
+	if streamHandler != nil {
+		mux.HandleFunc("GET /api/v1/stream/keyframes", streamHandler.HandleKeyframes)
 	}
 
 	// Build middleware chain: metrics -> logging -> auth -> mux.
@@ -289,26 +299,101 @@ func propagateTestHandler(logger *slog.Logger, prop *propagation.Propagator) htt
 			return
 		}
 
-		// Build compact response matching spec format.
-		type satResponse struct {
-			ID int        `json:"id"`
-			P  [3]float64 `json:"p"`
-		}
-		sats := make([]satResponse, len(kf.Satellites))
-		for i, s := range kf.Satellites {
-			sats[i] = satResponse{ID: s.NORADID, P: s.PositionECEF}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(keyframeResponse(kf))
+	}
+}
+
+// cacheLatestHandler returns the most recent cached keyframe.
+func cacheLatestHandler(kfCache *cache.KeyframeCache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		kf := kfCache.GetLatest()
+		if kf == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "no cached keyframes available"})
+			return
 		}
 
-		resp := struct {
-			Timestamp  string        `json:"timestamp"`
-			Satellites []satResponse `json:"satellites"`
-		}{
-			Timestamp:  kf.Timestamp.UTC().Format(time.RFC3339),
-			Satellites: sats,
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(keyframeResponse(kf))
+	}
+}
+
+// cacheAtHandler returns the cached keyframe at a specific time.
+func cacheAtHandler(kfCache *cache.KeyframeCache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		t := r.URL.Query().Get("time")
+		if t == "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "time parameter required (RFC3339)"})
+			return
+		}
+
+		parsed, err := time.Parse(time.RFC3339, t)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid time format, use RFC3339"})
+			return
+		}
+
+		kf := kfCache.Get(parsed)
+		if kf == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "no keyframe cached for this time"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(keyframeResponse(kf))
+	}
+}
+
+// cacheStatsHandler returns cache statistics.
+func cacheStatsHandler(kfCache *cache.KeyframeCache) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		stats := kfCache.Stats()
+
+		resp := map[string]any{
+			"entries":         stats.Entries,
+			"size_bytes":      stats.SizeBytes,
+			"hits":            stats.Hits,
+			"misses":          stats.Misses,
+			"evictions":       stats.Evictions,
+			"in_grace_period": stats.InGracePeriod,
+		}
+
+		if !stats.OldestTimestamp.IsZero() {
+			resp["oldest_timestamp"] = stats.OldestTimestamp.UTC().Format(time.RFC3339)
+		}
+		if !stats.NewestTimestamp.IsZero() {
+			resp["newest_timestamp"] = stats.NewestTimestamp.UTC().Format(time.RFC3339)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// keyframeResponse builds the compact JSON response for a keyframe.
+func keyframeResponse(kf *propagation.Keyframe) any {
+	type satResponse struct {
+		ID int        `json:"id"`
+		P  [3]float64 `json:"p"`
+	}
+	sats := make([]satResponse, len(kf.Satellites))
+	for i, s := range kf.Satellites {
+		sats[i] = satResponse{ID: s.NORADID, P: s.PositionECEF}
+	}
+	return struct {
+		Timestamp  string        `json:"timestamp"`
+		Satellites []satResponse `json:"satellites"`
+	}{
+		Timestamp:  kf.Timestamp.UTC().Format(time.RFC3339),
+		Satellites: sats,
 	}
 }
 

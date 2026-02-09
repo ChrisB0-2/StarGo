@@ -96,6 +96,102 @@ var (
 			Help: "Number of active propagation workers.",
 		},
 	)
+
+	// Cache metrics.
+	cacheSizeBytes = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "stargo_cache_size_bytes",
+			Help: "Estimated memory size of the keyframe cache.",
+		},
+	)
+
+	cacheEntries = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "stargo_cache_entries",
+			Help: "Number of keyframes in cache.",
+		},
+	)
+
+	cacheHitsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stargo_cache_hits_total",
+			Help: "Total cache hits.",
+		},
+	)
+
+	cacheMissesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stargo_cache_misses_total",
+			Help: "Total cache misses.",
+		},
+	)
+
+	cacheRegenerationDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "stargo_cache_regeneration_duration_seconds",
+			Help:    "Duration of cache regeneration operations.",
+			Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10, 30, 60},
+		},
+	)
+
+	cacheRegenerationErrorsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stargo_cache_regeneration_errors_total",
+			Help: "Total cache regeneration errors.",
+		},
+	)
+
+	cacheGracePeriodActive = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "stargo_cache_grace_period_active",
+			Help: "1 if TLE cutover grace period is active, 0 otherwise.",
+		},
+	)
+
+	cacheEvictionsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stargo_cache_evictions_total",
+			Help: "Total expired cache entries removed.",
+		},
+	)
+
+	// Stream metrics.
+	streamsActive = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "stargo_streams_active",
+			Help: "Number of active SSE connections.",
+		},
+	)
+
+	streamBytesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stargo_stream_bytes_total",
+			Help: "Total bytes sent to all streams.",
+		},
+	)
+
+	streamMessagesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stargo_stream_messages_total",
+			Help: "Total keyframe messages sent.",
+		},
+	)
+
+	streamErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stargo_stream_errors_total",
+			Help: "Total stream errors by type.",
+		},
+		[]string{"type"},
+	)
+
+	streamConnectionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stargo_stream_connections_total",
+			Help: "Total stream connections by status.",
+		},
+		[]string{"status"},
+	)
 )
 
 func init() {
@@ -110,6 +206,19 @@ func init() {
 	prometheus.MustRegister(propagationSatellitesTotal)
 	prometheus.MustRegister(propagationErrorsTotal)
 	prometheus.MustRegister(propagationWorkersActive)
+	prometheus.MustRegister(cacheSizeBytes)
+	prometheus.MustRegister(cacheEntries)
+	prometheus.MustRegister(cacheHitsTotal)
+	prometheus.MustRegister(cacheMissesTotal)
+	prometheus.MustRegister(cacheRegenerationDurationSeconds)
+	prometheus.MustRegister(cacheRegenerationErrorsTotal)
+	prometheus.MustRegister(cacheGracePeriodActive)
+	prometheus.MustRegister(cacheEvictionsTotal)
+	prometheus.MustRegister(streamsActive)
+	prometheus.MustRegister(streamBytesTotal)
+	prometheus.MustRegister(streamMessagesTotal)
+	prometheus.MustRegister(streamErrorsTotal)
+	prometheus.MustRegister(streamConnectionsTotal)
 }
 
 // Handler returns the Prometheus metrics HTTP handler.
@@ -153,6 +262,80 @@ func IncPropagationErrors(errType string) {
 // SetPropagationWorkersActive sets the number of active propagation workers.
 func SetPropagationWorkersActive(n int) {
 	propagationWorkersActive.Set(float64(n))
+}
+
+// SetCacheSizeBytes sets the estimated cache memory size.
+func SetCacheSizeBytes(n int64) {
+	cacheSizeBytes.Set(float64(n))
+}
+
+// SetCacheEntries sets the number of keyframes in cache.
+func SetCacheEntries(n int) {
+	cacheEntries.Set(float64(n))
+}
+
+// IncCacheHits increments the cache hit counter.
+func IncCacheHits() {
+	cacheHitsTotal.Inc()
+}
+
+// IncCacheMisses increments the cache miss counter.
+func IncCacheMisses() {
+	cacheMissesTotal.Inc()
+}
+
+// ObserveCacheRegenerationDuration records a cache regeneration duration.
+func ObserveCacheRegenerationDuration(d time.Duration) {
+	cacheRegenerationDurationSeconds.Observe(d.Seconds())
+}
+
+// IncCacheRegenerationErrors increments the cache regeneration error counter.
+func IncCacheRegenerationErrors() {
+	cacheRegenerationErrorsTotal.Inc()
+}
+
+// SetCacheGracePeriodActive sets the grace period gauge.
+func SetCacheGracePeriodActive(active bool) {
+	if active {
+		cacheGracePeriodActive.Set(1)
+	} else {
+		cacheGracePeriodActive.Set(0)
+	}
+}
+
+// AddCacheEvictions adds to the cache eviction counter.
+func AddCacheEvictions(n int) {
+	cacheEvictionsTotal.Add(float64(n))
+}
+
+// IncStreamsActive increments the active streams gauge.
+func IncStreamsActive() {
+	streamsActive.Inc()
+}
+
+// DecStreamsActive decrements the active streams gauge.
+func DecStreamsActive() {
+	streamsActive.Dec()
+}
+
+// AddStreamBytes adds to the stream bytes counter.
+func AddStreamBytes(n int64) {
+	streamBytesTotal.Add(float64(n))
+}
+
+// IncStreamMessages increments the stream messages counter.
+func IncStreamMessages() {
+	streamMessagesTotal.Inc()
+}
+
+// IncStreamErrors increments the stream error counter for a given error type.
+func IncStreamErrors(errType string) {
+	streamErrorsTotal.WithLabelValues(errType).Inc()
+}
+
+// IncStreamConnections increments the stream connections counter for a given status.
+func IncStreamConnections(status string) {
+	streamConnectionsTotal.WithLabelValues(status).Inc()
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code.

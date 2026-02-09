@@ -15,8 +15,10 @@ import (
 
 	"github.com/star/stargo/internal/api"
 	"github.com/star/stargo/internal/auth"
+	"github.com/star/stargo/internal/cache"
 	"github.com/star/stargo/internal/metrics"
 	"github.com/star/stargo/internal/propagation"
+	"github.com/star/stargo/internal/stream"
 	"github.com/star/stargo/internal/tle"
 )
 
@@ -38,10 +40,10 @@ func main() {
 
 	tleCfg := loadTLEConfig(logger)
 	store := tle.NewStore()
-	cache := tle.NewCache(tleCfg.CacheDir, tleCfg.MaxFiles)
+	tleCache := tle.NewCache(tleCfg.CacheDir, tleCfg.MaxFiles)
 
 	// Attempt to load cached TLE data on startup.
-	data, ts, err := cache.LoadLatest()
+	data, ts, err := tleCache.LoadLatest()
 	if err != nil {
 		logger.Info("no TLE cache found, starting without TLE data", "error", err)
 	} else {
@@ -78,11 +80,20 @@ func main() {
 	prop := propagation.NewPropagator(store, propCfg, logger)
 	metrics.SetPropagationWorkersActive(propCfg.Workers)
 
-	srv := api.NewServer(addr, logger, authCfg, store, tleCfg, prop)
+	cacheCfg := loadCacheConfig(logger, propCfg)
+	kfCache := cache.NewKeyframeCache(cacheCfg, prop, store, logger)
+
+	streamCfg := loadStreamConfig(logger)
+	streamHandler := stream.NewHandler(kfCache, store, streamCfg, logger)
+
+	srv := api.NewServer(addr, logger, authCfg, store, tleCfg, prop, kfCache, streamHandler)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Start cache background worker.
+	go kfCache.Start(ctx)
 
 	// Background goroutine to update TLE dataset age gauge.
 	go func() {
@@ -146,6 +157,60 @@ func loadAuthConfig(logger *slog.Logger) (auth.Config, error) {
 	return cfg, nil
 }
 
+func loadCacheConfig(logger *slog.Logger, propCfg propagation.PropConfig) cache.Config {
+	cfg := cache.Config{
+		Step:        propCfg.Step,
+		Horizon:     propCfg.Horizon,
+		GracePeriod: 30 * time.Second,
+		Buffer:      60 * time.Second,
+	}
+
+	if v := os.Getenv("STARGO_CACHE_STEP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_CACHE_STEP value, using propagation step", "value", v)
+		} else {
+			cfg.Step = time.Duration(n) * time.Second
+		}
+	}
+
+	if v := os.Getenv("STARGO_CACHE_HORIZON"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_CACHE_HORIZON value, using propagation horizon", "value", v)
+		} else {
+			cfg.Horizon = time.Duration(n) * time.Second
+		}
+	}
+
+	if v := os.Getenv("STARGO_CACHE_GRACE_PERIOD"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_CACHE_GRACE_PERIOD value, using default", "value", v, "default", 30)
+		} else {
+			cfg.GracePeriod = time.Duration(n) * time.Second
+		}
+	}
+
+	if v := os.Getenv("STARGO_CACHE_BUFFER"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_CACHE_BUFFER value, using default", "value", v, "default", 60)
+		} else {
+			cfg.Buffer = time.Duration(n) * time.Second
+		}
+	}
+
+	logger.Info("cache config",
+		"step_seconds", cfg.Step.Seconds(),
+		"horizon_seconds", cfg.Horizon.Seconds(),
+		"grace_period_seconds", cfg.GracePeriod.Seconds(),
+		"buffer_seconds", cfg.Buffer.Seconds(),
+	)
+
+	return cfg
+}
+
 func loadPropConfig(logger *slog.Logger) propagation.PropConfig {
 	cfg := propagation.PropConfig{
 		Workers: runtime.NumCPU(),
@@ -184,6 +249,49 @@ func loadPropConfig(logger *slog.Logger) propagation.PropConfig {
 		"workers", cfg.Workers,
 		"step_seconds", cfg.Step.Seconds(),
 		"horizon_seconds", cfg.Horizon.Seconds(),
+	)
+
+	return cfg
+}
+
+func loadStreamConfig(logger *slog.Logger) stream.Config {
+	cfg := stream.Config{
+		MaxConcurrentPerIP: 10,
+		BandwidthLimit:     1048576,
+		KeepaliveInterval:  30 * time.Second,
+	}
+
+	if v := os.Getenv("STARGO_STREAM_MAX_CONCURRENT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_STREAM_MAX_CONCURRENT value, using default", "value", v, "default", 10)
+		} else {
+			cfg.MaxConcurrentPerIP = n
+		}
+	}
+
+	if v := os.Getenv("STARGO_STREAM_BANDWIDTH_LIMIT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_STREAM_BANDWIDTH_LIMIT value, using default", "value", v, "default", 1048576)
+		} else {
+			cfg.BandwidthLimit = n
+		}
+	}
+
+	if v := os.Getenv("STARGO_STREAM_KEEPALIVE_INTERVAL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_STREAM_KEEPALIVE_INTERVAL value, using default", "value", v, "default", 30)
+		} else {
+			cfg.KeepaliveInterval = time.Duration(n) * time.Second
+		}
+	}
+
+	logger.Info("stream config",
+		"max_concurrent_per_ip", cfg.MaxConcurrentPerIP,
+		"bandwidth_limit", cfg.BandwidthLimit,
+		"keepalive_interval_seconds", cfg.KeepaliveInterval.Seconds(),
 	)
 
 	return cfg
