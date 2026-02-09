@@ -13,6 +13,7 @@ import (
 	"github.com/star/stargo/internal/auth"
 	"github.com/star/stargo/internal/health"
 	"github.com/star/stargo/internal/metrics"
+	"github.com/star/stargo/internal/propagation"
 	"github.com/star/stargo/internal/tle"
 )
 
@@ -32,7 +33,7 @@ type Server struct {
 }
 
 // NewServer creates a configured HTTP server.
-func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle.Store, tleCfg TLEConfig) *Server {
+func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle.Store, tleCfg TLEConfig, prop *propagation.Propagator) *Server {
 	mux := http.NewServeMux()
 
 	checker := health.NewChecker(store, tleCfg.MaxAge)
@@ -50,6 +51,9 @@ func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle
 	})
 	mux.HandleFunc("GET /api/v1/tle/metadata", tleMetadataHandler(store))
 	mux.HandleFunc("POST /api/v1/tle/fetch", tleFetchHandler(logger, store, fetcher, cache, tleCfg.EnableFetch, rl))
+	if prop != nil {
+		mux.HandleFunc("GET /api/v1/propagate/test", propagateTestHandler(logger, prop))
+	}
 
 	// Build middleware chain: metrics -> logging -> auth -> mux.
 	var handler http.Handler = mux
@@ -257,6 +261,55 @@ type statusRecorder struct {
 func (sr *statusRecorder) WriteHeader(code int) {
 	sr.statusCode = code
 	sr.ResponseWriter.WriteHeader(code)
+}
+
+// propagateTestHandler returns a handler for the propagation test endpoint.
+// GET /api/v1/propagate/test?time=<RFC3339>
+func propagateTestHandler(logger *slog.Logger, prop *propagation.Propagator) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Parse target time (default: now + 60s).
+		targetTime := time.Now().Add(60 * time.Second)
+		if t := r.URL.Query().Get("time"); t != "" {
+			parsed, err := time.Parse(time.RFC3339, t)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid time format, use RFC3339"})
+				return
+			}
+			targetTime = parsed
+		}
+
+		kf, err := prop.PropagateToTime(r.Context(), targetTime)
+		if err != nil {
+			logger.Error("propagation test failed", "error", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		// Build compact response matching spec format.
+		type satResponse struct {
+			ID int        `json:"id"`
+			P  [3]float64 `json:"p"`
+		}
+		sats := make([]satResponse, len(kf.Satellites))
+		for i, s := range kf.Satellites {
+			sats[i] = satResponse{ID: s.NORADID, P: s.PositionECEF}
+		}
+
+		resp := struct {
+			Timestamp  string        `json:"timestamp"`
+			Satellites []satResponse `json:"satellites"`
+		}{
+			Timestamp:  kf.Timestamp.UTC().Format(time.RFC3339),
+			Satellites: sats,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	}
 }
 
 func loggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {

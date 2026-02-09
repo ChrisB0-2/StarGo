@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/star/stargo/internal/api"
 	"github.com/star/stargo/internal/auth"
 	"github.com/star/stargo/internal/metrics"
+	"github.com/star/stargo/internal/propagation"
 	"github.com/star/stargo/internal/tle"
 )
 
@@ -72,7 +74,11 @@ func main() {
 		}
 	}
 
-	srv := api.NewServer(addr, logger, authCfg, store, tleCfg)
+	propCfg := loadPropConfig(logger)
+	prop := propagation.NewPropagator(store, propCfg, logger)
+	metrics.SetPropagationWorkersActive(propCfg.Workers)
+
+	srv := api.NewServer(addr, logger, authCfg, store, tleCfg, prop)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -138,6 +144,49 @@ func loadAuthConfig(logger *slog.Logger) (auth.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadPropConfig(logger *slog.Logger) propagation.PropConfig {
+	cfg := propagation.PropConfig{
+		Workers: runtime.NumCPU(),
+		Step:    5 * time.Second,
+		Horizon: 600 * time.Second,
+	}
+
+	if v := os.Getenv("STARGO_PROP_WORKERS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_PROP_WORKERS value, using default", "value", v, "default", cfg.Workers)
+		} else {
+			cfg.Workers = n
+		}
+	}
+
+	if v := os.Getenv("STARGO_KEYFRAME_STEP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_KEYFRAME_STEP value, using default", "value", v, "default", 5)
+		} else {
+			cfg.Step = time.Duration(n) * time.Second
+		}
+	}
+
+	if v := os.Getenv("STARGO_KEYFRAME_HORIZON"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_KEYFRAME_HORIZON value, using default", "value", v, "default", 600)
+		} else {
+			cfg.Horizon = time.Duration(n) * time.Second
+		}
+	}
+
+	logger.Info("propagation config",
+		"workers", cfg.Workers,
+		"step_seconds", cfg.Step.Seconds(),
+		"horizon_seconds", cfg.Horizon.Seconds(),
+	)
+
+	return cfg
 }
 
 func loadTLEConfig(logger *slog.Logger) api.TLEConfig {

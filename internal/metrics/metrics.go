@@ -63,6 +63,39 @@ var (
 			Help: "Total number of TLE parse errors.",
 		},
 	)
+
+	// Propagation metrics.
+	propagationDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "stargo_propagation_duration_seconds",
+			Help:    "Duration of propagation operations in seconds.",
+			Buckets: []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+		[]string{"operation"},
+	)
+
+	propagationSatellitesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stargo_propagation_satellites_total",
+			Help: "Total number of satellites propagated.",
+		},
+		[]string{"status"},
+	)
+
+	propagationErrorsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stargo_propagation_errors_total",
+			Help: "Total number of propagation errors.",
+		},
+		[]string{"type"},
+	)
+
+	propagationWorkersActive = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "stargo_propagation_workers_active",
+			Help: "Number of active propagation workers.",
+		},
+	)
 )
 
 func init() {
@@ -73,6 +106,10 @@ func init() {
 	prometheus.MustRegister(tleDatasetAgeSeconds)
 	prometheus.MustRegister(tleDatasetCount)
 	prometheus.MustRegister(tleParseErrorsTotal)
+	prometheus.MustRegister(propagationDurationSeconds)
+	prometheus.MustRegister(propagationSatellitesTotal)
+	prometheus.MustRegister(propagationErrorsTotal)
+	prometheus.MustRegister(propagationWorkersActive)
 }
 
 // Handler returns the Prometheus metrics HTTP handler.
@@ -99,6 +136,23 @@ func SetTLEDatasetCount(n int) {
 // IncTLEParseErrors increments the TLE parse error counter.
 func IncTLEParseErrors() {
 	tleParseErrorsTotal.Inc()
+}
+
+// RecordPropagation records a batch propagation result.
+func RecordPropagation(duration time.Duration, successCount, errorCount int) {
+	propagationDurationSeconds.WithLabelValues("propagate").Observe(duration.Seconds())
+	propagationSatellitesTotal.WithLabelValues("success").Add(float64(successCount))
+	propagationSatellitesTotal.WithLabelValues("error").Add(float64(errorCount))
+}
+
+// IncPropagationErrors increments the propagation error counter for a given error type.
+func IncPropagationErrors(errType string) {
+	propagationErrorsTotal.WithLabelValues(errType).Inc()
+}
+
+// SetPropagationWorkersActive sets the number of active propagation workers.
+func SetPropagationWorkersActive(n int) {
+	propagationWorkersActive.Set(float64(n))
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code.
