@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const defaultSourceURL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle"
+const defaultSourceURL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle"
 
 // Fetcher retrieves raw TLE data from a remote source.
 type Fetcher struct {
