@@ -20,6 +20,7 @@ import (
 	"github.com/star/stargo/internal/propagation"
 	"github.com/star/stargo/internal/stream"
 	"github.com/star/stargo/internal/tle"
+	"github.com/star/stargo/web"
 )
 
 func main() {
@@ -86,7 +87,7 @@ func main() {
 	streamCfg := loadStreamConfig(logger)
 	streamHandler := stream.NewHandler(kfCache, store, streamCfg, logger)
 
-	srv := api.NewServer(addr, logger, authCfg, store, tleCfg, prop, kfCache, streamHandler)
+	srv := api.NewServer(addr, logger, authCfg, store, tleCfg, prop, kfCache, streamHandler, web.Content)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

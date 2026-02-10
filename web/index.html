@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>StarGo Satellite Tracker</title>
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.119/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.119/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+    <link href="styles.css" rel="stylesheet">
+</head>
+<body>
+    <div id="cesiumContainer"></div>
+
+    <div id="statusBar" class="overlay top">
+        <span id="tleAge" class="tle-fresh">TLE Age: --</span>
+        <span class="sep">|</span>
+        <span id="datasetEpoch">Dataset: --</span>
+        <span class="sep">|</span>
+        <span id="connectionStatus" class="status-disconnected">Connecting...</span>
+        <span class="sep">|</span>
+        <span id="satCount">0 satellites</span>
+    </div>
+
+    <div id="controls" class="overlay bottom">
+        <button id="pauseBtn" class="ctrl-btn">Pause</button>
+        <span class="speed-label">Speed:</span>
+        <button class="speed-btn active" data-speed="1">1x</button>
+        <button class="speed-btn" data-speed="2">2x</button>
+        <button class="speed-btn" data-speed="5">5x</button>
+        <button class="speed-btn" data-speed="10">10x</button>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

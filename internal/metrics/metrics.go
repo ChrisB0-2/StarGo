@@ -349,6 +349,17 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap returns the underlying ResponseWriter (required by http.ResponseController).
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
 // Middleware records request count and duration for each request.
 func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

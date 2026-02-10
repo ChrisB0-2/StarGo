@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,7 +36,8 @@ type Server struct {
 }
 
 // NewServer creates a configured HTTP server.
-func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle.Store, tleCfg TLEConfig, prop *propagation.Propagator, kfCache *cache.KeyframeCache, streamHandler *stream.Handler) *Server {
+// webFS provides the frontend static files. If nil, the frontend is not served.
+func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle.Store, tleCfg TLEConfig, prop *propagation.Propagator, kfCache *cache.KeyframeCache, streamHandler *stream.Handler, webFS fs.FS) *Server {
 	mux := http.NewServeMux()
 
 	checker := health.NewChecker(store, tleCfg.MaxAge)
@@ -65,9 +67,15 @@ func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle
 		mux.HandleFunc("GET /api/v1/stream/keyframes", streamHandler.HandleKeyframes)
 	}
 
-	// Build middleware chain: metrics -> logging -> auth -> mux.
+	// Serve web frontend (fallback for unmatched GET requests).
+	if webFS != nil {
+		mux.Handle("GET /", http.FileServer(http.FS(webFS)))
+	}
+
+	// Build middleware chain: metrics -> logging -> cors -> auth -> mux.
 	var handler http.Handler = mux
 	handler = auth.Middleware(authCfg)(handler)
+	handler = corsMiddleware(handler)
 	handler = loggingMiddleware(logger)(handler)
 	handler = metrics.Middleware(handler)
 
@@ -273,6 +281,17 @@ func (sr *statusRecorder) WriteHeader(code int) {
 	sr.ResponseWriter.WriteHeader(code)
 }
 
+func (sr *statusRecorder) Flush() {
+	if f, ok := sr.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap returns the underlying ResponseWriter (required by http.ResponseController).
+func (sr *statusRecorder) Unwrap() http.ResponseWriter {
+	return sr.ResponseWriter
+}
+
 // propagateTestHandler returns a handler for the propagation test endpoint.
 // GET /api/v1/propagate/test?time=<RFC3339>
 func propagateTestHandler(logger *slog.Logger, prop *propagation.Propagator) http.HandlerFunc {
@@ -395,6 +414,22 @@ func keyframeResponse(kf *propagation.Keyframe) any {
 		Timestamp:  kf.Timestamp.UTC().Format(time.RFC3339),
 		Satellites: sats,
 	}
+}
+
+// corsMiddleware adds CORS headers for cross-origin frontend access (e.g., dev server on a different port).
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func loggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
