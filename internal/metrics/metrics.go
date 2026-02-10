@@ -155,6 +155,23 @@ var (
 		},
 	)
 
+	// Single-satellite propagation endpoint metrics.
+	propagateRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stargo_propagate_requests_total",
+			Help: "Total on-demand single-satellite propagation requests.",
+		},
+		[]string{"status"},
+	)
+
+	propagateDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "stargo_propagate_duration_seconds",
+			Help:    "Duration of single-satellite propagation requests.",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
+		},
+	)
+
 	// Stream metrics.
 	streamsActive = prometheus.NewGauge(
 		prometheus.GaugeOpts{
@@ -214,6 +231,8 @@ func init() {
 	prometheus.MustRegister(cacheRegenerationErrorsTotal)
 	prometheus.MustRegister(cacheGracePeriodActive)
 	prometheus.MustRegister(cacheEvictionsTotal)
+	prometheus.MustRegister(propagateRequestsTotal)
+	prometheus.MustRegister(propagateDurationSeconds)
 	prometheus.MustRegister(streamsActive)
 	prometheus.MustRegister(streamBytesTotal)
 	prometheus.MustRegister(streamMessagesTotal)
@@ -331,6 +350,12 @@ func IncStreamMessages() {
 // IncStreamErrors increments the stream error counter for a given error type.
 func IncStreamErrors(errType string) {
 	streamErrorsTotal.WithLabelValues(errType).Inc()
+}
+
+// RecordPropagateRequest records a single-satellite propagation request.
+func RecordPropagateRequest(status string, duration time.Duration) {
+	propagateRequestsTotal.WithLabelValues(status).Inc()
+	propagateDurationSeconds.Observe(duration.Seconds())
 }
 
 // IncStreamConnections increments the stream connections counter for a given status.

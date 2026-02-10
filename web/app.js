@@ -13,7 +13,7 @@
 var CESIUM_ION_TOKEN = '';
 
 var CONFIG = {
-    sseEndpoint:        '/api/v1/stream/keyframes?step=5&horizon=600',
+    sseEndpoint:        '/api/v1/stream/keyframes?step=5&horizon=600&trail=20',
     authToken:          '',        // Bearer token (set if STARGO_AUTH_ENABLED=true)
     reconnectBaseMs:    1000,      // Initial reconnect delay
     reconnectMaxMs:     30000,     // Max reconnect delay
@@ -25,7 +25,8 @@ var CONFIG = {
 var state = {
     viewer:          null,
     pointCollection: null,
-    satellites:      new Map(),  // NORAD ID -> { point: PointPrimitive }
+    trailCollection: null,
+    satellites:      new Map(),  // NORAD ID -> { point, polyline }
 
     prevKeyframe:    null,       // { time: epoch ms, sats: Map<id, [x,y,z]> }
     currKeyframe:    null,
@@ -33,6 +34,7 @@ var state = {
     connected:       false,
     paused:          false,
     speed:           1,
+    trailsEnabled:   true,
     tleAge:          0,          // Seconds
     datasetEpoch:    null,       // ISO string
     satCount:        0,
@@ -104,6 +106,11 @@ function setupCesium() {
     // PointPrimitiveCollection: efficient batch rendering for 2000+ satellites.
     state.pointCollection = state.viewer.scene.primitives.add(
         new Cesium.PointPrimitiveCollection()
+    );
+
+    // PolylineCollection: orbital trails behind each satellite.
+    state.trailCollection = state.viewer.scene.primitives.add(
+        new Cesium.PolylineCollection()
     );
 
     _scratch = new Cesium.Cartesian3();
@@ -238,17 +245,39 @@ function handleKeyframeBatch(msg) {
 
     state.satCount = sats.length;
 
-    // Create points for newly seen satellites.
+    // Create/update points and trails for each satellite.
     for (var j = 0; j < sats.length; j++) {
         var sat = sats[j];
-        if (!state.satellites.has(sat.id)) {
+        var pos = new Cesium.Cartesian3(sat.p[0], sat.p[1], sat.p[2]);
+        var satState = state.satellites.get(sat.id);
+
+        if (!satState) {
+            // New satellite — create point and trail polyline.
             var point = state.pointCollection.add({
-                position:        new Cesium.Cartesian3(sat.p[0], sat.p[1], sat.p[2]),
+                position:        pos,
                 pixelSize:       3,
                 color:           altitudeColor(sat.p),
                 scaleByDistance:  new Cesium.NearFarScalar(1e7, 1.5, 5e7, 0.5),
             });
-            state.satellites.set(sat.id, { point: point });
+            var polyline = state.trailCollection.add({
+                positions: [pos],
+                width:     1,
+                material:  Cesium.Material.fromType('Color', {
+                    color: altitudeColor(sat.p).withAlpha(0.3),
+                }),
+                show: state.trailsEnabled,
+            });
+            state.satellites.set(sat.id, { point: point, polyline: polyline });
+        }
+
+        // Update trail from server-provided positions.
+        satState = state.satellites.get(sat.id);
+        if (satState && sat.tr && sat.tr.length > 0 && state.trailsEnabled) {
+            var positions = new Array(sat.tr.length);
+            for (var k = 0; k < sat.tr.length; k++) {
+                positions[k] = new Cesium.Cartesian3(sat.tr[k][0], sat.tr[k][1], sat.tr[k][2]);
+            }
+            satState.polyline.positions = positions;
         }
     }
 
@@ -378,6 +407,16 @@ function setupControls() {
         pauseBtn.addEventListener('click', function () {
             state.paused = !state.paused;
             pauseBtn.textContent = state.paused ? 'Play' : 'Pause';
+        });
+    }
+
+    var trailBtn = document.getElementById('trailBtn');
+    if (trailBtn) {
+        trailBtn.addEventListener('click', function () {
+            state.trailsEnabled = !state.trailsEnabled;
+            trailBtn.textContent = state.trailsEnabled ? 'Trails: ON' : 'Trails: OFF';
+            trailBtn.classList.toggle('active', state.trailsEnabled);
+            state.trailCollection.show = state.trailsEnabled;
         });
     }
 

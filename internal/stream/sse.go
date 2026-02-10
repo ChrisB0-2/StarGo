@@ -82,6 +82,18 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 		horizon = n
 	}
 
+	trail := 20
+	if v := r.URL.Query().Get("trail"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > 120 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid trail parameter, must be 0-120"})
+			return
+		}
+		trail = n
+	}
+
 	// Rate limiting: enforce concurrent stream limit per IP.
 	ip := clientIP(r)
 	if !h.limiter.acquire(ip) {
@@ -193,7 +205,12 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			batch := buildBatchMessage(kf)
+			var trailKFs []*propagation.Keyframe
+			if trail > 0 {
+				trailKFs = h.cache.GetRecent(t, trail)
+			}
+
+			batch := buildBatchMessage(kf, trailKFs)
 			if err := c.sendJSON(batch); err != nil {
 				metrics.IncStreamErrors("send_error")
 				h.logger.Warn("stream send error", "remote_ip", ip, "error", err)
@@ -214,12 +231,29 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 }
 
 // buildBatchMessage formats a keyframe into the SSE batch payload.
-func buildBatchMessage(kf *propagation.Keyframe) keyframeBatchMessage {
+// If trailKFs is non-empty, each satellite includes past positions (oldest first).
+func buildBatchMessage(kf *propagation.Keyframe, trailKFs []*propagation.Keyframe) keyframeBatchMessage {
+	// Build index: NORAD ID → trail positions (oldest first).
+	var trailIndex map[int][][3]float64
+	if len(trailKFs) > 0 {
+		trailIndex = make(map[int][][3]float64, len(kf.Satellites))
+		for _, tkf := range trailKFs {
+			for _, s := range tkf.Satellites {
+				trailIndex[s.NORADID] = append(trailIndex[s.NORADID], s.PositionECEF)
+			}
+		}
+	}
+
 	sats := make([]satPayload, len(kf.Satellites))
 	for i, s := range kf.Satellites {
 		sats[i] = satPayload{
 			ID: s.NORADID,
 			P:  s.PositionECEF,
+		}
+		if trailIndex != nil {
+			if tr, ok := trailIndex[s.NORADID]; ok {
+				sats[i].Tr = tr
+			}
 		}
 	}
 	return keyframeBatchMessage{
@@ -246,6 +280,7 @@ type keyframeBatchMessage struct {
 }
 
 type satPayload struct {
-	ID int        `json:"id"`
-	P  [3]float64 `json:"p"`
+	ID int          `json:"id"`
+	P  [3]float64   `json:"p"`
+	Tr [][3]float64 `json:"tr,omitempty"`
 }

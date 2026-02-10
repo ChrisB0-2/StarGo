@@ -20,12 +20,30 @@ var exemptPaths = map[string]bool{
 	"/api/v1/tle/metadata": true,
 }
 
+// exemptPrefixes are path prefixes that are always public.
+var exemptPrefixes = []string{
+	"/api/v1/propagate/",
+}
+
+// isExempt returns true if the path is exempt from auth.
+func isExempt(path string) bool {
+	if exemptPaths[path] {
+		return true
+	}
+	for _, prefix := range exemptPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Middleware returns an HTTP middleware that enforces Bearer token auth
 // on non-exempt paths when auth is enabled.
 func Middleware(cfg Config) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !cfg.Enabled || exemptPaths[r.URL.Path] {
+			if !cfg.Enabled || isExempt(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}

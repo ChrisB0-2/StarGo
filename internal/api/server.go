@@ -18,6 +18,7 @@ import (
 	"github.com/star/stargo/internal/propagation"
 	"github.com/star/stargo/internal/stream"
 	"github.com/star/stargo/internal/tle"
+	"github.com/star/stargo/internal/transform"
 )
 
 // TLEConfig holds TLE-related configuration for the server.
@@ -66,6 +67,7 @@ func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle
 	if streamHandler != nil {
 		mux.HandleFunc("GET /api/v1/stream/keyframes", streamHandler.HandleKeyframes)
 	}
+	mux.HandleFunc("GET /api/v1/propagate/{norad_id}", propagateSingleHandler(logger, store))
 
 	// Serve web frontend (fallback for unmatched GET requests).
 	if webFS != nil {
@@ -297,7 +299,7 @@ func (sr *statusRecorder) Unwrap() http.ResponseWriter {
 func propagateTestHandler(logger *slog.Logger, prop *propagation.Propagator) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Parse target time (default: now + 60s).
-		targetTime := time.Now().Add(60 * time.Second)
+		targetTime := time.Now().UTC().Add(60 * time.Second)
 		if t := r.URL.Query().Get("time"); t != "" {
 			parsed, err := time.Parse(time.RFC3339, t)
 			if err != nil {
@@ -394,6 +396,127 @@ func cacheStatsHandler(kfCache *cache.KeyframeCache) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
+	}
+}
+
+// propagateSingleHandler returns a handler for on-demand single-satellite propagation.
+// GET /api/v1/propagate/{norad_id}?horizon=5400&step=5
+func propagateSingleHandler(logger *slog.Logger, store *tle.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		w.Header().Set("Content-Type", "application/json")
+
+		// Parse NORAD ID from path.
+		noradIDStr := r.PathValue("norad_id")
+		noradID, err := strconv.Atoi(noradIDStr)
+		if err != nil || noradID <= 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid norad_id"})
+			return
+		}
+
+		// Parse horizon (seconds), default 5400 (90 min).
+		horizon := 5400
+		if v := r.URL.Query().Get("horizon"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 86400 {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid horizon: must be <= 86400 seconds"})
+				return
+			}
+			horizon = n
+		}
+
+		// Parse step (seconds), default 5.
+		step := 5
+		if v := r.URL.Query().Get("step"); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 1 || n > 60 {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid step: must be between 1 and 60 seconds"})
+				return
+			}
+			step = n
+		}
+
+		// Get current TLE dataset.
+		ds := store.Get()
+		if ds == nil {
+			metrics.RecordPropagateRequest("503", time.Since(start))
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "no TLE dataset available"})
+			return
+		}
+
+		// Find the TLE entry for this NORAD ID.
+		var entry *tle.TLEEntry
+		for i := range ds.Satellites {
+			if ds.Satellites[i].NORADID == noradID {
+				entry = &ds.Satellites[i]
+				break
+			}
+		}
+		if entry == nil {
+			metrics.RecordPropagateRequest("404", time.Since(start))
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]any{"error": "satellite not found", "norad_id": noradID})
+			return
+		}
+
+		// Create SGP4 propagator for this satellite.
+		sgp4, err := propagation.NewSGP4Propagator(entry.Line1, entry.Line2, noradID)
+		if err != nil {
+			metrics.RecordPropagateRequest("500", time.Since(start))
+			logger.Warn("sgp4 init failed", "norad_id", noradID, "error", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "propagation init failed"})
+			return
+		}
+
+		// Propagate from now to now+horizon at step intervals.
+		now := time.Now().UTC()
+		stepDur := time.Duration(step) * time.Second
+		horizonDur := time.Duration(horizon) * time.Second
+		numPositions := int(horizonDur/stepDur) + 1
+
+		type posEntry struct {
+			T string     `json:"t"`
+			P [3]float64 `json:"p"`
+		}
+		positions := make([]posEntry, 0, numPositions)
+
+		for i := 0; i < numPositions; i++ {
+			t := now.Add(time.Duration(i) * stepDur)
+			teme, err := sgp4.Propagate(t.Year(), int(t.Month()), t.Day(), t.Hour(), t.Minute(), t.Second())
+			if err != nil {
+				continue // Skip failed time steps.
+			}
+			ecef := transform.TEMEToECEF(teme, t)
+			positions = append(positions, posEntry{
+				T: t.Format(time.RFC3339),
+				P: [3]float64{ecef.X, ecef.Y, ecef.Z},
+			})
+		}
+
+		duration := time.Since(start)
+		metrics.RecordPropagateRequest("200", duration)
+
+		logger.Debug("propagate single",
+			"norad_id", noradID,
+			"horizon", horizon,
+			"step", step,
+			"duration_ms", duration.Milliseconds(),
+			"position_count", len(positions),
+			"remote_ip", r.RemoteAddr,
+		)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"norad_id":  noradID,
+			"horizon":   horizon,
+			"step":      step,
+			"count":     len(positions),
+			"positions": positions,
+		})
 	}
 }
 

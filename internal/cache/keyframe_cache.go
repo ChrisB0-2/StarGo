@@ -75,8 +75,9 @@ func NewKeyframeCache(config Config, prop *propagation.Propagator, store *tle.St
 
 // RoundToStep rounds a timestamp down to the nearest step boundary.
 // This normalizes timestamps so cache lookups hit consistently.
+// Always converts to UTC first — SGP4 and GMST expect UTC components.
 func (c *KeyframeCache) RoundToStep(t time.Time) time.Time {
-	return t.Truncate(c.config.Step)
+	return t.UTC().Truncate(c.config.Step)
 }
 
 // Get returns the keyframe for the given timestamp, or nil if not cached.
@@ -97,6 +98,28 @@ func (c *KeyframeCache) Get(t time.Time) *propagation.Keyframe {
 	c.misses.Add(1)
 	metrics.IncCacheMisses()
 	return nil
+}
+
+// GetRecent returns up to count keyframes before (and including) time t,
+// ordered oldest-first. Used to build orbital trails.
+func (c *KeyframeCache) GetRecent(t time.Time, count int) []*propagation.Keyframe {
+	if count <= 0 {
+		return nil
+	}
+
+	key := c.RoundToStep(t)
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	result := make([]*propagation.Keyframe, 0, count)
+	for i := count - 1; i >= 0; i-- {
+		ts := key.Add(-time.Duration(i) * c.config.Step)
+		if entry, ok := c.entries[ts]; ok {
+			result = append(result, entry.Keyframe)
+		}
+	}
+	return result
 }
 
 // GetLatest returns the keyframe closest to (but not after) the current time.

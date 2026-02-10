@@ -45,6 +45,7 @@ func JulianDate(t time.Time) float64 {
 //
 // where T is Julian centuries of UT1 from J2000.0, result is in seconds of time.
 func GMST(t time.Time) float64 {
+	t = t.UTC()
 	jd := JulianDate(t)
 	tUT1 := (jd - j2000) / 36525.0
 
