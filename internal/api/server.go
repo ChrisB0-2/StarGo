@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -56,6 +58,7 @@ func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle
 	})
 	mux.HandleFunc("GET /api/v1/tle/metadata", tleMetadataHandler(store))
 	mux.HandleFunc("POST /api/v1/tle/fetch", tleFetchHandler(logger, store, fetcher, cache, tleCfg.EnableFetch, rl))
+	mux.HandleFunc("POST /api/v1/refresh-tles", tleRefreshHandler(logger, store, fetcher, cache, tleCfg.EnableFetch, rl))
 	if prop != nil {
 		mux.HandleFunc("GET /api/v1/propagate/test", propagateTestHandler(logger, prop))
 	}
@@ -132,6 +135,84 @@ func tleMetadataHandler(store *tle.Store) http.HandlerFunc {
 	}
 }
 
+// tleRefreshResult holds the result of a TLE fetch-parse-store operation.
+type tleRefreshResult struct {
+	Dataset  *tle.TLEDataset
+	Duration time.Duration
+}
+
+// doTLERefresh downloads, parses, caches, and stores a fresh TLE dataset.
+// Caller must hold store.Lock() to serialize concurrent refreshes.
+func doTLERefresh(ctx context.Context, logger *slog.Logger, store *tle.Store, fetcher *tle.Fetcher, diskCache *tle.Cache) (*tleRefreshResult, error) {
+	logger.Info("Refreshing TLE data from Celestrak...")
+
+	start := time.Now()
+	raw, err := fetcher.Fetch(ctx)
+	duration := time.Since(start)
+
+	if err != nil {
+		metrics.RecordTLEFetch("error", duration)
+		logger.Error("TLE refresh failed", "error", err, "duration_ms", duration.Milliseconds())
+		return nil, fmt.Errorf("fetch: %w", err)
+	}
+
+	entries, err := tle.Parse(bytes.NewReader(raw), logger)
+	if err != nil {
+		metrics.RecordTLEFetch("parse_error", duration)
+		metrics.IncTLEParseErrors()
+		logger.Error("TLE parse failed", "error", err)
+		return nil, fmt.Errorf("parse: %w", err)
+	}
+
+	if len(entries) == 0 {
+		metrics.RecordTLEFetch("empty", duration)
+		logger.Warn("TLE fetch returned no entries")
+		return nil, fmt.Errorf("no TLE entries parsed")
+	}
+
+	now := time.Now()
+
+	// Cache raw data to disk.
+	if err := diskCache.Write(raw, now); err != nil {
+		logger.Error("failed to write TLE cache", "error", err)
+	}
+
+	// Compute epoch range.
+	minEpoch := entries[0].Epoch
+	maxEpoch := entries[0].Epoch
+	for _, e := range entries[1:] {
+		if e.Epoch.Before(minEpoch) {
+			minEpoch = e.Epoch
+		}
+		if e.Epoch.After(maxEpoch) {
+			maxEpoch = e.Epoch
+		}
+	}
+
+	ds := &tle.TLEDataset{
+		Source:    fetcher.SourceURL(),
+		FetchedAt: now,
+		EpochRange: tle.EpochRange{
+			Min: minEpoch,
+			Max: maxEpoch,
+		},
+		Satellites: entries,
+	}
+
+	store.Set(ds)
+	metrics.RecordTLEFetch("success", duration)
+	metrics.SetTLEDatasetCount(len(entries))
+	metrics.SetTLEDatasetAge(0)
+
+	logger.Info("TLE refresh complete",
+		"satellites_loaded", len(entries),
+		"age_seconds", 0,
+		"duration_ms", duration.Milliseconds(),
+	)
+
+	return &tleRefreshResult{Dataset: ds, Duration: duration}, nil
+}
+
 func tleFetchHandler(logger *slog.Logger, store *tle.Store, fetcher *tle.Fetcher, cache *tle.Cache, enableFetch bool, rl *rateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !enableFetch {
@@ -141,7 +222,6 @@ func tleFetchHandler(logger *slog.Logger, store *tle.Store, fetcher *tle.Fetcher
 			return
 		}
 
-		// Rate limit by IP.
 		ip := clientIP(r)
 		if !rl.allow(ip) {
 			w.Header().Set("Content-Type", "application/json")
@@ -151,84 +231,64 @@ func tleFetchHandler(logger *slog.Logger, store *tle.Store, fetcher *tle.Fetcher
 			return
 		}
 
-		// Serialize fetch operations.
 		store.Lock()
 		defer store.Unlock()
 
-		start := time.Now()
-		raw, err := fetcher.Fetch(r.Context())
-		duration := time.Since(start)
-
-		if err != nil {
-			metrics.RecordTLEFetch("error", duration)
-			logger.Error("TLE fetch failed", "error", err, "duration_ms", duration.Milliseconds())
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadGateway)
-			json.NewEncoder(w).Encode(map[string]string{"error": "failed to fetch TLE data"})
-			return
-		}
-
-		entries, err := tle.Parse(bytes.NewReader(raw), logger)
-		if err != nil {
-			metrics.RecordTLEFetch("parse_error", duration)
-			metrics.IncTLEParseErrors()
-			logger.Error("TLE parse failed", "error", err)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "failed to parse TLE data"})
-			return
-		}
-
-		if len(entries) == 0 {
-			metrics.RecordTLEFetch("empty", duration)
-			logger.Warn("TLE fetch returned no entries")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "no TLE entries parsed"})
-			return
-		}
-
-		now := time.Now()
-
-		// Cache raw data.
-		if err := cache.Write(raw, now); err != nil {
-			logger.Error("failed to write TLE cache", "error", err)
-		}
-
-		// Compute epoch range.
-		minEpoch := entries[0].Epoch
-		maxEpoch := entries[0].Epoch
-		for _, e := range entries[1:] {
-			if e.Epoch.Before(minEpoch) {
-				minEpoch = e.Epoch
-			}
-			if e.Epoch.After(maxEpoch) {
-				maxEpoch = e.Epoch
-			}
-		}
-
-		ds := &tle.TLEDataset{
-			Source:    fetcher.SourceURL(),
-			FetchedAt: now,
-			EpochRange: tle.EpochRange{
-				Min: minEpoch,
-				Max: maxEpoch,
-			},
-			Satellites: entries,
-		}
-
-		store.Set(ds)
-		metrics.RecordTLEFetch("success", duration)
-		metrics.SetTLEDatasetCount(len(entries))
-		metrics.SetTLEDatasetAge(0)
-
-		logger.Info("TLE dataset updated", "count", len(entries), "duration_ms", duration.Milliseconds())
-
+		result, err := doTLERefresh(r.Context(), logger, store, fetcher, cache)
 		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":     "ok",
-			"count":      len(entries),
-			"fetched_at": now.UTC().Format(time.RFC3339),
+			"count":      len(result.Dataset.Satellites),
+			"fetched_at": result.Dataset.FetchedAt.UTC().Format(time.RFC3339),
+		})
+	}
+}
+
+func tleRefreshHandler(logger *slog.Logger, store *tle.Store, fetcher *tle.Fetcher, cache *tle.Cache, enableFetch bool, rl *rateLimiter) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !enableFetch {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": "TLE fetch is disabled"})
+			return
+		}
+
+		ip := clientIP(r)
+		if !rl.allow(ip) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]string{"error": "rate limit exceeded"})
+			return
+		}
+
+		store.Lock()
+		defer store.Unlock()
+
+		result, err := doTLERefresh(r.Context(), logger, store, fetcher, cache)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{
+				"status":  "error",
+				"message": "TLE refresh failed: " + err.Error(),
+			})
+			return
+		}
+
+		ds := result.Dataset
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":            "success",
+			"satellites_loaded": len(ds.Satellites),
+			"tle_age_seconds":   int(time.Since(ds.FetchedAt).Seconds()),
+			"dataset_epoch":     ds.FetchedAt.UTC().Format(time.RFC3339),
+			"message":           "TLE data refreshed successfully",
 		})
 	}
 }

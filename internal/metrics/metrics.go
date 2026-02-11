@@ -392,7 +392,7 @@ func normalizeRoute(path string) string {
 	switch path {
 	case "/healthz", "/readyz", "/metrics", "/",
 		"/api/v1/test", "/api/v1/tle/metadata", "/api/v1/tle/fetch",
-		"/api/v1/propagate/test",
+		"/api/v1/refresh-tles", "/api/v1/propagate/test",
 		"/api/v1/cache/keyframes/latest", "/api/v1/cache/keyframes/at",
 		"/api/v1/cache/stats", "/api/v1/stream/keyframes":
 		return path
