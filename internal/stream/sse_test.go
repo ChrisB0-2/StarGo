@@ -60,7 +60,7 @@ func TestBuildBatchMessage(t *testing.T) {
 		},
 	}
 
-	msg := buildBatchMessage(kf)
+	msg := buildBatchMessage(kf, nil)
 
 	if msg.Type != "keyframe_batch" {
 		t.Errorf("type = %q, want %q", msg.Type, "keyframe_batch")
