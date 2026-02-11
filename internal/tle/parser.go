@@ -12,7 +12,7 @@ import (
 
 // Parse reads 3-line NORAD TLE format from r and returns parsed entries.
 // Malformed entries are skipped with a warning log.
-func Parse(r io.Reader) ([]TLEEntry, error) {
+func Parse(r io.Reader, logger *slog.Logger) ([]TLEEntry, error) {
 	scanner := bufio.NewScanner(r)
 	var lines []string
 	for scanner.Scan() {
@@ -34,7 +34,7 @@ func Parse(r io.Reader) ([]TLEEntry, error) {
 		// Validate line prefixes.
 		if !strings.HasPrefix(line1, "1 ") || !strings.HasPrefix(line2, "2 ") {
 			// Try to find next valid triplet.
-			slog.Warn("skipping malformed TLE entry", "line_index", i, "name", name)
+			logger.Warn("skipping malformed TLE entry", "line_index", i, "name", name)
 			i++
 			continue
 		}
@@ -43,21 +43,21 @@ func Parse(r io.Reader) ([]TLEEntry, error) {
 		noradStr := strings.TrimSpace(line1[2:7])
 		noradID, err := strconv.Atoi(noradStr)
 		if err != nil {
-			slog.Warn("skipping TLE entry with invalid NORAD ID", "norad_str", noradStr, "name", name)
+			logger.Warn("skipping TLE entry with invalid NORAD ID", "norad_str", noradStr, "name", name)
 			i += 3
 			continue
 		}
 
 		// Extract epoch from line1 cols 19-32 (0-indexed: 18..32).
 		if len(line1) < 32 {
-			slog.Warn("skipping TLE entry with short line1", "name", name)
+			logger.Warn("skipping TLE entry with short line1", "name", name)
 			i += 3
 			continue
 		}
 		epochStr := strings.TrimSpace(line1[18:32])
 		epoch, err := parseEpoch(epochStr)
 		if err != nil {
-			slog.Warn("skipping TLE entry with invalid epoch", "epoch_str", epochStr, "name", name, "error", err)
+			logger.Warn("skipping TLE entry with invalid epoch", "epoch_str", epochStr, "name", name, "error", err)
 			i += 3
 			continue
 		}

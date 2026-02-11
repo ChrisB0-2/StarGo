@@ -13,6 +13,7 @@ import (
 // propagateJob is a unit of work for the worker pool.
 type propagateJob struct {
 	entry      tle.TLEEntry
+	prop       *SGP4Propagator // cached propagator (nil if init failed)
 	targetTime time.Time
 	gmst       float64 // precomputed GMST for targetTime
 }
@@ -48,6 +49,21 @@ func (wp *WorkerPool) PropagateBatch(ctx context.Context, entries []tle.TLEEntry
 	// Precompute GMST once for the target time (same for all satellites).
 	gmst := transform.GMST(targetTime)
 
+	// Pre-build SGP4 propagators once per satellite to avoid re-parsing TLE
+	// strings on every time step. Failed inits are logged and skipped.
+	props := make(map[int]*SGP4Propagator, len(entries))
+	for _, entry := range entries {
+		if _, ok := props[entry.NORADID]; ok {
+			continue
+		}
+		p, err := NewSGP4Propagator(entry.Line1, entry.Line2, entry.NORADID)
+		if err != nil {
+			wp.logger.Warn("sgp4 init failed (skipping)", "norad_id", entry.NORADID, "error", err)
+			continue
+		}
+		props[entry.NORADID] = p
+	}
+
 	jobs := make(chan propagateJob, wp.workers*2)
 	results := make(chan propagateResult, wp.workers*2)
 
@@ -68,12 +84,17 @@ func (wp *WorkerPool) PropagateBatch(ctx context.Context, entries []tle.TLEEntry
 		}()
 	}
 
-	// Feed jobs in a goroutine.
+	// Feed jobs in a goroutine, skipping satellites whose init failed.
 	go func() {
 		defer close(jobs)
 		for _, entry := range entries {
+			p := props[entry.NORADID]
+			if p == nil {
+				continue
+			}
 			job := propagateJob{
 				entry:      entry,
+				prop:       p,
 				targetTime: targetTime,
 				gmst:       gmst,
 			}
@@ -113,13 +134,8 @@ func (wp *WorkerPool) PropagateBatch(ctx context.Context, entries []tle.TLEEntry
 
 // propagateSingle performs SGP4 propagation and TEME→ECEF transform for one satellite.
 func propagateSingle(job propagateJob) propagateResult {
-	prop, err := NewSGP4Propagator(job.entry.Line1, job.entry.Line2, job.entry.NORADID)
-	if err != nil {
-		return propagateResult{noradID: job.entry.NORADID, err: err}
-	}
-
 	t := job.targetTime
-	teme, err := prop.Propagate(t.Year(), int(t.Month()), t.Day(), t.Hour(), t.Minute(), t.Second())
+	teme, err := job.prop.Propagate(t.Year(), int(t.Month()), t.Day(), t.Hour(), t.Minute(), t.Second())
 	if err != nil {
 		return propagateResult{noradID: job.entry.NORADID, err: err}
 	}

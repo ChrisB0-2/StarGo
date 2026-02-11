@@ -168,7 +168,7 @@ func tleFetchHandler(logger *slog.Logger, store *tle.Store, fetcher *tle.Fetcher
 			return
 		}
 
-		entries, err := tle.Parse(bytes.NewReader(raw))
+		entries, err := tle.Parse(bytes.NewReader(raw), logger)
 		if err != nil {
 			metrics.RecordTLEFetch("parse_error", duration)
 			metrics.IncTLEParseErrors()

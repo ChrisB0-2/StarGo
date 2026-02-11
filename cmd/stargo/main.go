@@ -48,7 +48,7 @@ func main() {
 	if err != nil {
 		logger.Info("no TLE cache found, starting without TLE data", "error", err)
 	} else {
-		entries, err := tle.Parse(bytes.NewReader(data))
+		entries, err := tle.Parse(bytes.NewReader(data), logger)
 		if err != nil {
 			logger.Warn("failed to parse cached TLE data", "error", err)
 		} else if len(entries) > 0 {
