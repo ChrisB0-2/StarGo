@@ -16,7 +16,9 @@ package stream
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
@@ -164,6 +166,12 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 		logger:  h.logger,
 	}
 
+	// Send jittered retry interval (3-7s) to prevent thundering-herd
+	// reconnection storms when the server restarts.
+	retryMs := 3000 + rand.Intn(4000)
+	fmt.Fprintf(w, "retry: %d\n\n", retryMs)
+	flusher.Flush()
+
 	// Send metadata message (first message on every connection).
 	if ds := h.store.Get(); ds != nil {
 		meta := metadataMessage{
@@ -211,7 +219,13 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 			}
 
 			batch := buildBatchMessage(kf, trailKFs)
-			if err := c.sendJSON(batch); err != nil {
+			data, err := json.Marshal(batch)
+			if err != nil {
+				metrics.IncStreamErrors("marshal_error")
+				h.logger.Warn("stream marshal error", "remote_ip", ip, "error", err)
+				continue
+			}
+			if err := c.sendRaw(data); err != nil {
 				metrics.IncStreamErrors("send_error")
 				h.logger.Warn("stream send error", "remote_ip", ip, "error", err)
 				return

@@ -225,7 +225,7 @@ func TestSSEMessageFormat(t *testing.T) {
 		if line == "" {
 			continue
 		}
-		if !strings.HasPrefix(line, "data: ") && line != ":" {
+		if !strings.HasPrefix(line, "data: ") && !strings.HasPrefix(line, "retry: ") && line != ":" {
 			// Allow empty lines between events.
 			if strings.TrimSpace(line) != "" {
 				t.Errorf("unexpected SSE line: %q", line)

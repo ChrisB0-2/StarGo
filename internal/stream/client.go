@@ -29,7 +29,13 @@ func (c *client) sendJSON(v any) error {
 	if err != nil {
 		return fmt.Errorf("json marshal: %w", err)
 	}
+	return c.sendRaw(data)
+}
 
+// sendRaw writes pre-serialized JSON bytes as an SSE "data:" message.
+// Use this to avoid redundant json.Marshal calls when the same payload
+// is sent to multiple clients.
+func (c *client) sendRaw(data []byte) error {
 	// Extend write deadline before each write to prevent timeout on long-lived connections.
 	if err := c.rc.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		c.logger.Debug("could not set write deadline", "error", err)
