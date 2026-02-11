@@ -3,6 +3,7 @@ package metrics
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -385,6 +386,23 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 	return rw.ResponseWriter
 }
 
+// normalizeRoute maps a request path to a fixed route label to prevent
+// Prometheus cardinality explosion from parameterized or unknown paths.
+func normalizeRoute(path string) string {
+	switch path {
+	case "/healthz", "/readyz", "/metrics", "/",
+		"/api/v1/test", "/api/v1/tle/metadata", "/api/v1/tle/fetch",
+		"/api/v1/propagate/test",
+		"/api/v1/cache/keyframes/latest", "/api/v1/cache/keyframes/at",
+		"/api/v1/cache/stats", "/api/v1/stream/keyframes":
+		return path
+	}
+	if strings.HasPrefix(path, "/api/v1/propagate/") {
+		return "/api/v1/propagate/{norad_id}"
+	}
+	return "other"
+}
+
 // Middleware records request count and duration for each request.
 func Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -395,8 +413,9 @@ func Middleware(next http.Handler) http.Handler {
 
 		duration := time.Since(start).Seconds()
 		code := strconv.Itoa(rw.statusCode)
+		route := normalizeRoute(r.URL.Path)
 
-		httpRequestsTotal.WithLabelValues(r.URL.Path, r.Method, code).Inc()
-		httpDurationSeconds.WithLabelValues(r.URL.Path, r.Method).Observe(duration)
+		httpRequestsTotal.WithLabelValues(route, r.Method, code).Inc()
+		httpDurationSeconds.WithLabelValues(route, r.Method).Observe(duration)
 	})
 }

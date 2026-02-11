@@ -473,11 +473,23 @@ func propagateSingleHandler(logger *slog.Logger, store *tle.Store) http.HandlerF
 			return
 		}
 
+		// Cap computation budget: max 10,800 positions per request
+		// (e.g., 90 min at 0.5s step, or 15h at 5s step).
+		const maxPositions = 10800
+		numPositions := horizon/step + 1
+		if numPositions > maxPositions {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error":          "too many positions requested",
+				"max_positions":  maxPositions,
+				"requested":      numPositions,
+			})
+			return
+		}
+
 		// Propagate from now to now+horizon at step intervals.
 		now := time.Now().UTC()
 		stepDur := time.Duration(step) * time.Second
-		horizonDur := time.Duration(horizon) * time.Second
-		numPositions := int(horizonDur/stepDur) + 1
 
 		type posEntry struct {
 			T string     `json:"t"`

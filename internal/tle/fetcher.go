@@ -51,9 +51,14 @@ func (f *Fetcher) Fetch(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected status code %d from %s", resp.StatusCode, f.sourceURL)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Cap body size to 50 MB to prevent OOM from oversized upstream responses.
+	const maxTLEBodySize = 50 * 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTLEBodySize+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+	if len(body) > maxTLEBodySize {
+		return nil, fmt.Errorf("response body exceeds %d byte limit", maxTLEBodySize)
 	}
 
 	return body, nil
