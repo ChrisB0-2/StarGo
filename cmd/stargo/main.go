@@ -300,9 +300,10 @@ func loadStreamConfig(logger *slog.Logger) stream.Config {
 
 func loadTLEConfig(logger *slog.Logger) api.TLEConfig {
 	cfg := api.TLEConfig{
-		CacheDir: "/tmp/stargo/tle",
-		MaxFiles: 5,
-		MaxAge:   24 * time.Hour,
+		EnableFetch: true,
+		CacheDir:    "/tmp/stargo/tle",
+		MaxFiles:    5,
+		MaxAge:      24 * time.Hour,
 	}
 
 	if v := os.Getenv("STARGO_ENABLE_TLE_FETCH"); v != "" {
