@@ -241,16 +241,18 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// rateLimiter enforces 1 request per minute per IP.
+// rateLimiter enforces 1 request per minute per IP with periodic pruning.
 type rateLimiter struct {
 	mu    sync.Mutex
 	times map[string]time.Time
 }
 
 func newRateLimiter() *rateLimiter {
-	return &rateLimiter{
+	rl := &rateLimiter{
 		times: make(map[string]time.Time),
 	}
+	go rl.pruneLoop()
+	return rl
 }
 
 func (rl *rateLimiter) allow(ip string) bool {
@@ -266,6 +268,22 @@ func (rl *rateLimiter) allow(ip string) bool {
 
 	rl.times[ip] = now
 	return true
+}
+
+// pruneLoop removes stale entries every 5 minutes to prevent unbounded map growth.
+func (rl *rateLimiter) pruneLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		rl.mu.Lock()
+		now := time.Now()
+		for ip, last := range rl.times {
+			if now.Sub(last) >= 2*time.Minute {
+				delete(rl.times, ip)
+			}
+		}
+		rl.mu.Unlock()
+	}
 }
 
 // probePath returns true for health/readiness probe paths that should not log at INFO.

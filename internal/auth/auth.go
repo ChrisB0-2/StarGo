@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -51,7 +52,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			header := r.Header.Get("Authorization")
 			token := strings.TrimPrefix(header, "Bearer ")
 
-			if header == "" || token == header || token != cfg.Token {
+			if header == "" || token == header || subtle.ConstantTimeCompare([]byte(token), []byte(cfg.Token)) != 1 {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
 				json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})

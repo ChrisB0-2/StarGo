@@ -21,16 +21,15 @@ func NewChecker(store *tle.Store, maxAge time.Duration) *Checker {
 	}
 }
 
-// Readyz returns 200 when the service is ready.
-// If no dataset exists, returns 200 (TLE not required yet).
-// If dataset exists and age exceeds maxAge, returns 503.
+// Readyz returns 200 when the service is ready to serve data.
+// Returns 503 if no TLE dataset is loaded or if dataset age exceeds maxAge.
 func (c *Checker) Readyz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
 
 	ds := c.store.Get()
 	if ds == nil {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ready\n"))
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("not ready: no TLE data\n"))
 		return
 	}
 
