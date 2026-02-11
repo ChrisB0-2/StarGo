@@ -480,9 +480,9 @@ func propagateSingleHandler(logger *slog.Logger, store *tle.Store) http.HandlerF
 		if numPositions > maxPositions {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]any{
-				"error":          "too many positions requested",
-				"max_positions":  maxPositions,
-				"requested":      numPositions,
+				"error":         "too many positions requested",
+				"max_positions": maxPositions,
+				"requested":     numPositions,
 			})
 			return
 		}
