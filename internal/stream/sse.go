@@ -15,15 +15,18 @@
 package stream
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/star/stargo/internal/cache"
+	"github.com/star/stargo/internal/httputil"
 	"github.com/star/stargo/internal/metrics"
 	"github.com/star/stargo/internal/propagation"
 	"github.com/star/stargo/internal/tle"
@@ -34,6 +37,7 @@ type Config struct {
 	MaxConcurrentPerIP int           // Max concurrent streams per IP (default: 10).
 	BandwidthLimit     int           // Bytes per second per stream (default: 1048576).
 	KeepaliveInterval  time.Duration // Keep-alive ping interval (default: 30s).
+	TrustProxy         bool          // Trust X-Forwarded-For / X-Real-IP headers.
 }
 
 // Handler manages SSE streaming connections.
@@ -97,7 +101,7 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rate limiting: enforce concurrent stream limit per IP.
-	ip := clientIP(r)
+	ip := httputil.ClientIP(r, h.config.TrustProxy)
 	if !h.limiter.acquire(ip) {
 		metrics.IncStreamErrors("rate_limit")
 		h.logger.Warn("stream rate limit exceeded",
@@ -123,8 +127,13 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 		"horizon", horizon,
 	)
 
-	// Cleanup on disconnect: release rate limit slot and update metrics.
+	var gzw *gzip.Writer
+
+	// Cleanup on disconnect: close compressor, release rate limit, update metrics.
 	defer func() {
+		if gzw != nil {
+			gzw.Close()
+		}
 		h.limiter.release(ip)
 		metrics.IncStreamConnections("disconnect")
 		metrics.DecStreamsActive()
@@ -148,6 +157,14 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // Disable nginx buffering.
+
+	// Enable gzip compression if the client supports it.
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Vary", "Accept-Encoding")
+		gzw, _ = gzip.NewWriterLevel(w, gzip.BestSpeed)
+	}
+
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
@@ -162,15 +179,17 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 		w:       w,
 		flusher: flusher,
 		rc:      rc,
+		gzw:     gzw,
 		ip:      ip,
 		logger:  h.logger,
 	}
+	c.initBandwidth(h.config.BandwidthLimit)
 
 	// Send jittered retry interval (3-7s) to prevent thundering-herd
 	// reconnection storms when the server restarts.
 	retryMs := 3000 + rand.Intn(4000)
-	fmt.Fprintf(w, "retry: %d\n\n", retryMs)
-	flusher.Flush()
+	fmt.Fprintf(c.activeWriter(), "retry: %d\n\n", retryMs)
+	c.flush()
 
 	// Send metadata message (first message on every connection).
 	if ds := h.store.Get(); ds != nil {
@@ -225,6 +244,29 @@ func (h *Handler) HandleKeyframes(w http.ResponseWriter, r *http.Request) {
 				h.logger.Warn("stream marshal error", "remote_ip", ip, "error", err)
 				continue
 			}
+
+			// Bandwidth enforcement: shed trails first, then skip frame.
+			if !c.hasBudget(len(data)) {
+				if trailKFs != nil {
+					metrics.IncStreamErrors("trail_shed")
+					batch = buildBatchMessage(kf, nil)
+					data, err = json.Marshal(batch)
+					if err != nil {
+						metrics.IncStreamErrors("marshal_error")
+						continue
+					}
+				}
+				if !c.hasBudget(len(data)) {
+					metrics.IncStreamErrors("frame_skip")
+					if err := c.sendFrameSkip(kf.Timestamp, "bandwidth"); err != nil {
+						h.logger.Warn("stream frame_skip error", "remote_ip", ip, "error", err)
+						return
+					}
+					keepaliveTicker.Reset(h.config.KeepaliveInterval)
+					continue
+				}
+			}
+
 			if err := c.sendRaw(data); err != nil {
 				metrics.IncStreamErrors("send_error")
 				h.logger.Warn("stream send error", "remote_ip", ip, "error", err)

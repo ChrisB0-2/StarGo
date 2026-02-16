@@ -86,7 +86,15 @@ func TestWorkerPoolBatch(t *testing.T) {
 	target := time.Date(2024, 4, 10, 12, 0, 0, 0, time.UTC)
 	ctx := context.Background()
 
-	positions, successCount, errorCount := pool.PropagateBatch(ctx, entries, target)
+	props := make(map[int]*SGP4Propagator, len(entries))
+	for _, e := range entries {
+		p, _ := NewSGP4Propagator(e.Line1, e.Line2, e.NORADID)
+		if p != nil {
+			props[e.NORADID] = p
+		}
+	}
+
+	positions, successCount, errorCount := pool.PropagateBatch(ctx, entries, target, props)
 	if errorCount > 0 {
 		t.Logf("errors: %d (may be expected for synthetic TLE)", errorCount)
 	}
@@ -123,7 +131,16 @@ func TestWorkerPoolCancellation(t *testing.T) {
 	cancel() // Cancel immediately.
 
 	target := time.Date(2024, 4, 10, 12, 0, 0, 0, time.UTC)
-	positions, _, _ := pool.PropagateBatch(ctx, entries, target)
+
+	props := make(map[int]*SGP4Propagator, len(entries))
+	for _, e := range entries {
+		p, _ := NewSGP4Propagator(e.Line1, e.Line2, e.NORADID)
+		if p != nil {
+			props[e.NORADID] = p
+		}
+	}
+
+	positions, _, _ := pool.PropagateBatch(ctx, entries, target, props)
 
 	// With immediate cancellation, we should get fewer results than entries.
 	// (Some may still complete before cancellation propagates.)

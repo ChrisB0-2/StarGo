@@ -41,28 +41,13 @@ func NewWorkerPool(workers int, logger *slog.Logger) *WorkerPool {
 
 // PropagateBatch propagates all satellites to the target time using the worker pool.
 // Returns results for all satellites that succeeded. Failed satellites are logged and skipped.
-func (wp *WorkerPool) PropagateBatch(ctx context.Context, entries []tle.TLEEntry, targetTime time.Time) ([]SatellitePosition, int, int) {
+func (wp *WorkerPool) PropagateBatch(ctx context.Context, entries []tle.TLEEntry, targetTime time.Time, props map[int]*SGP4Propagator) ([]SatellitePosition, int, int) {
 	if len(entries) == 0 {
 		return nil, 0, 0
 	}
 
 	// Precompute GMST once for the target time (same for all satellites).
 	gmst := transform.GMST(targetTime)
-
-	// Pre-build SGP4 propagators once per satellite to avoid re-parsing TLE
-	// strings on every time step. Failed inits are logged and skipped.
-	props := make(map[int]*SGP4Propagator, len(entries))
-	for _, entry := range entries {
-		if _, ok := props[entry.NORADID]; ok {
-			continue
-		}
-		p, err := NewSGP4Propagator(entry.Line1, entry.Line2, entry.NORADID)
-		if err != nil {
-			wp.logger.Warn("sgp4 init failed (skipping)", "norad_id", entry.NORADID, "error", err)
-			continue
-		}
-		props[entry.NORADID] = p
-	}
 
 	jobs := make(chan propagateJob, wp.workers*2)
 	results := make(chan propagateResult, wp.workers*2)
