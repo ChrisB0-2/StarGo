@@ -388,28 +388,6 @@ func TestInvalidQueryParams(t *testing.T) {
 	}
 }
 
-// TestClientIP verifies IP extraction from RemoteAddr.
-func TestClientIP(t *testing.T) {
-	tests := []struct {
-		remoteAddr string
-		want       string
-	}{
-		{"192.168.1.1:12345", "192.168.1.1"},
-		{"[::1]:12345", "::1"},
-		{"192.168.1.1", "192.168.1.1"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.remoteAddr, func(t *testing.T) {
-			r := &http.Request{RemoteAddr: tt.remoteAddr}
-			got := clientIP(r)
-			if got != tt.want {
-				t.Errorf("clientIP(%q) = %q, want %q", tt.remoteAddr, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestKeepaliveFormat verifies keep-alive is an SSE comment.
 func TestKeepaliveFormat(t *testing.T) {
 	// The keep-alive message should be ":\n\n" - a comment line followed by blank line.

@@ -17,6 +17,7 @@ import (
 	"github.com/star/stargo/internal/cache"
 	"github.com/star/stargo/internal/health"
 	"github.com/star/stargo/internal/metrics"
+	"github.com/star/stargo/internal/passes"
 	"github.com/star/stargo/internal/propagation"
 	"github.com/star/stargo/internal/stream"
 	"github.com/star/stargo/internal/tle"
@@ -25,11 +26,12 @@ import (
 
 // TLEConfig holds TLE-related configuration for the server.
 type TLEConfig struct {
-	EnableFetch bool
-	SourceURL   string
-	CacheDir    string
-	MaxAge      time.Duration
-	MaxFiles    int
+	EnableFetch     bool
+	SourceURL       string
+	ExtraSourceURLs []string
+	CacheDir        string
+	MaxAge          time.Duration
+	MaxFiles        int
 }
 
 // Server holds the HTTP server and its dependencies.
@@ -44,7 +46,7 @@ func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle
 	mux := http.NewServeMux()
 
 	checker := health.NewChecker(store, tleCfg.MaxAge)
-	fetcher := tle.NewFetcher(tleCfg.SourceURL)
+	fetcher := tle.NewFetcher(tleCfg.SourceURL, logger, tleCfg.ExtraSourceURLs...)
 	cache := tle.NewCache(tleCfg.CacheDir, tleCfg.MaxFiles)
 	rl := newRateLimiter()
 
@@ -71,6 +73,7 @@ func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle
 		mux.HandleFunc("GET /api/v1/stream/keyframes", streamHandler.HandleKeyframes)
 	}
 	mux.HandleFunc("GET /api/v1/propagate/{norad_id}", propagateSingleHandler(logger, store))
+	mux.HandleFunc("POST /api/v1/passes", passesHandler(logger, store))
 
 	// Serve web frontend (fallback for unmatched GET requests).
 	if webFS != nil {
@@ -163,6 +166,8 @@ func doTLERefresh(ctx context.Context, logger *slog.Logger, store *tle.Store, fe
 		logger.Error("TLE parse failed", "error", err)
 		return nil, fmt.Errorf("parse: %w", err)
 	}
+
+	entries = tle.Deduplicate(entries)
 
 	if len(entries) == 0 {
 		metrics.RecordTLEFetch("empty", duration)
@@ -606,6 +611,153 @@ func propagateSingleHandler(logger *slog.Logger, store *tle.Store) http.HandlerF
 			"step":      step,
 			"count":     len(positions),
 			"positions": positions,
+		})
+	}
+}
+
+// passesHandler returns a handler for POST /api/v1/passes.
+func passesHandler(logger *slog.Logger, store *tle.Store) http.HandlerFunc {
+	type passesRequest struct {
+		Latitude     float64 `json:"latitude"`
+		Longitude    float64 `json:"longitude"`
+		Altitude     float64 `json:"altitude"`
+		NORADIDs     []int   `json:"norad_ids"`
+		MinElevation float64 `json:"min_elevation"`
+		HorizonHours float64 `json:"horizon_hours"`
+		MaxPasses    int     `json:"max_passes"`
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		w.Header().Set("Content-Type", "application/json")
+
+		var req passesRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			metrics.RecordPassRequest("400", time.Since(start), 0)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+
+		// Validate latitude.
+		if req.Latitude < -90 || req.Latitude > 90 {
+			metrics.RecordPassRequest("400", time.Since(start), 0)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "latitude must be between -90 and 90"})
+			return
+		}
+		// Validate longitude.
+		if req.Longitude < -180 || req.Longitude > 180 {
+			metrics.RecordPassRequest("400", time.Since(start), 0)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "longitude must be between -180 and 180"})
+			return
+		}
+		// Validate altitude.
+		if req.Altitude < 0 || req.Altitude > 10000 {
+			metrics.RecordPassRequest("400", time.Since(start), 0)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "altitude must be between 0 and 10000 meters"})
+			return
+		}
+
+		// Apply defaults.
+		if req.MinElevation == 0 {
+			// 0 is both the default and a valid value, so we leave it as-is.
+		}
+		if req.MinElevation < 0 || req.MinElevation > 90 {
+			metrics.RecordPassRequest("400", time.Since(start), 0)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "min_elevation must be between 0 and 90"})
+			return
+		}
+		if req.HorizonHours == 0 {
+			req.HorizonHours = 24
+		}
+		if req.HorizonHours < 1 || req.HorizonHours > 168 {
+			metrics.RecordPassRequest("400", time.Since(start), 0)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "horizon_hours must be between 1 and 168"})
+			return
+		}
+		if req.MaxPasses == 0 {
+			req.MaxPasses = 10
+		}
+		if req.MaxPasses < 1 || req.MaxPasses > 100 {
+			metrics.RecordPassRequest("400", time.Since(start), 0)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "max_passes must be between 1 and 100"})
+			return
+		}
+
+		// Get current TLE dataset.
+		ds := store.Get()
+		if ds == nil {
+			metrics.RecordPassRequest("503", time.Since(start), 0)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "no TLE dataset available"})
+			return
+		}
+
+		// Select satellite entries.
+		var entries []tle.TLEEntry
+		if len(req.NORADIDs) == 0 {
+			// All satellites, capped at 200.
+			entries = ds.Satellites
+			if len(entries) > 200 {
+				entries = entries[:200]
+			}
+		} else {
+			// Build index for fast lookup.
+			byID := make(map[int]*tle.TLEEntry, len(ds.Satellites))
+			for i := range ds.Satellites {
+				byID[ds.Satellites[i].NORADID] = &ds.Satellites[i]
+			}
+			for _, id := range req.NORADIDs {
+				if e, ok := byID[id]; ok {
+					entries = append(entries, *e)
+				}
+			}
+			if len(entries) == 0 {
+				metrics.RecordPassRequest("404", time.Since(start), 0)
+				w.WriteHeader(http.StatusNotFound)
+				json.NewEncoder(w).Encode(map[string]string{"error": "none of the requested satellites found"})
+				return
+			}
+		}
+
+		obs := transform.NewObserverPosition(req.Latitude, req.Longitude, req.Altitude)
+
+		predReq := passes.Request{
+			Observer:     obs,
+			Entries:      entries,
+			Start:        time.Now().UTC(),
+			HorizonHours: req.HorizonHours,
+			MinElevation: req.MinElevation,
+			MaxPasses:    req.MaxPasses,
+		}
+
+		results := passes.Predict(r.Context(), predReq)
+
+		duration := time.Since(start)
+		metrics.RecordPassRequest("200", duration, len(entries))
+
+		logger.Info("pass prediction",
+			"satellites", len(entries),
+			"duration_ms", duration.Milliseconds(),
+			"remote_ip", r.RemoteAddr,
+		)
+
+		json.NewEncoder(w).Encode(map[string]any{
+			"observer": map[string]any{
+				"latitude":  req.Latitude,
+				"longitude": req.Longitude,
+				"altitude":  req.Altitude,
+			},
+			"horizon_hours": req.HorizonHours,
+			"min_elevation": req.MinElevation,
+			"max_passes":    req.MaxPasses,
+			"satellites":    results,
 		})
 	}
 }

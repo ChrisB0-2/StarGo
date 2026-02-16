@@ -1,8 +1,6 @@
 package stream
 
 import (
-	"net"
-	"net/http"
 	"sync"
 )
 
@@ -60,11 +58,3 @@ func (l *streamLimiter) count(ip string) int {
 	return l.connections[ip]
 }
 
-// clientIP extracts the client IP from the request.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}

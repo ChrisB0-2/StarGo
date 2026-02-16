@@ -75,6 +75,26 @@ func Parse(r io.Reader, logger *slog.Logger) ([]TLEEntry, error) {
 	return entries, nil
 }
 
+// Deduplicate removes duplicate NORAD IDs from entries, keeping the entry with the
+// newest epoch. This is useful when merging TLEs from multiple sources.
+func Deduplicate(entries []TLEEntry) []TLEEntry {
+	best := make(map[int]int) // NORAD ID -> index in result
+	var result []TLEEntry
+
+	for _, e := range entries {
+		if idx, exists := best[e.NORADID]; exists {
+			if e.Epoch.After(result[idx].Epoch) {
+				result[idx] = e
+			}
+		} else {
+			best[e.NORADID] = len(result)
+			result = append(result, e)
+		}
+	}
+
+	return result
+}
+
 // parseEpoch converts a TLE epoch string in YYDDD.DDDDDDDD format to time.Time.
 // Year 00-56 → 2000s, 57-99 → 1900s.
 func parseEpoch(s string) (time.Time, error) {

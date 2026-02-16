@@ -210,6 +210,31 @@ var (
 		},
 		[]string{"status"},
 	)
+
+	// Pass prediction metrics.
+	passRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stargo_pass_requests_total",
+			Help: "Total pass prediction requests.",
+		},
+		[]string{"status"},
+	)
+
+	passDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "stargo_pass_duration_seconds",
+			Help:    "Duration of pass prediction requests in seconds.",
+			Buckets: []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+	)
+
+	passSatellitesPerRequest = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "stargo_pass_satellites_per_request",
+			Help:    "Number of satellites per pass prediction request.",
+			Buckets: []float64{1, 5, 10, 25, 50, 100},
+		},
+	)
 )
 
 func init() {
@@ -239,6 +264,9 @@ func init() {
 	prometheus.MustRegister(streamMessagesTotal)
 	prometheus.MustRegister(streamErrorsTotal)
 	prometheus.MustRegister(streamConnectionsTotal)
+	prometheus.MustRegister(passRequestsTotal)
+	prometheus.MustRegister(passDurationSeconds)
+	prometheus.MustRegister(passSatellitesPerRequest)
 }
 
 // Handler returns the Prometheus metrics HTTP handler.
@@ -364,6 +392,13 @@ func IncStreamConnections(status string) {
 	streamConnectionsTotal.WithLabelValues(status).Inc()
 }
 
+// RecordPassRequest records a pass prediction request.
+func RecordPassRequest(status string, duration time.Duration, numSats int) {
+	passRequestsTotal.WithLabelValues(status).Inc()
+	passDurationSeconds.Observe(duration.Seconds())
+	passSatellitesPerRequest.Observe(float64(numSats))
+}
+
 // responseWriter wraps http.ResponseWriter to capture the status code.
 type responseWriter struct {
 	http.ResponseWriter
@@ -394,7 +429,8 @@ func normalizeRoute(path string) string {
 		"/api/v1/test", "/api/v1/tle/metadata", "/api/v1/tle/fetch",
 		"/api/v1/refresh-tles", "/api/v1/propagate/test",
 		"/api/v1/cache/keyframes/latest", "/api/v1/cache/keyframes/at",
-		"/api/v1/cache/stats", "/api/v1/stream/keyframes":
+		"/api/v1/cache/stats", "/api/v1/stream/keyframes",
+		"/api/v1/passes":
 		return path
 	}
 	if strings.HasPrefix(path, "/api/v1/propagate/") {

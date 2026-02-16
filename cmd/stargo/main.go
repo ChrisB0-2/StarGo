@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -304,6 +305,10 @@ func loadTLEConfig(logger *slog.Logger) api.TLEConfig {
 		CacheDir:    "/tmp/stargo/tle",
 		MaxFiles:    5,
 		MaxAge:      24 * time.Hour,
+		ExtraSourceURLs: []string{
+			// ISS (NORAD 25544) — well-documented reference satellite for validation.
+			"https://celestrak.org/NORAD/elements/gp.php?CATNR=25544&FORMAT=tle",
+		},
 	}
 
 	if v := os.Getenv("STARGO_ENABLE_TLE_FETCH"); v != "" {
@@ -319,6 +324,17 @@ func loadTLEConfig(logger *slog.Logger) api.TLEConfig {
 		cfg.SourceURL = v
 	}
 
+	if v := os.Getenv("STARGO_TLE_EXTRA_URLS"); v != "" {
+		var urls []string
+		for _, u := range strings.Split(v, ",") {
+			u = strings.TrimSpace(u)
+			if u != "" {
+				urls = append(urls, u)
+			}
+		}
+		cfg.ExtraSourceURLs = urls
+	}
+
 	if v := os.Getenv("STARGO_TLE_CACHE_DIR"); v != "" {
 		cfg.CacheDir = v
 	}
@@ -331,6 +347,12 @@ func loadTLEConfig(logger *slog.Logger) api.TLEConfig {
 			cfg.MaxAge = time.Duration(seconds) * time.Second
 		}
 	}
+
+	logger.Info("TLE config",
+		"source_url", cfg.SourceURL,
+		"extra_urls", cfg.ExtraSourceURLs,
+		"cache_dir", cfg.CacheDir,
+	)
 
 	return cfg
 }
