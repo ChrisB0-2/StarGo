@@ -57,4 +57,3 @@ func (l *streamLimiter) count(ip string) int {
 	defer l.mu.Unlock()
 	return l.connections[ip]
 }
-

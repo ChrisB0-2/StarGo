@@ -4,8 +4,8 @@ import "math"
 
 // WGS-84 ellipsoid parameters.
 const (
-	wgs84A = 6378137.0          // semi-major axis (meters)
-	wgs84F = 1.0 / 298.257223563 // flattening
+	wgs84A  = 6378137.0             // semi-major axis (meters)
+	wgs84F  = 1.0 / 298.257223563   // flattening
 	wgs84E2 = wgs84F * (2 - wgs84F) // first eccentricity squared
 )
 
@@ -13,7 +13,7 @@ const (
 // ECEF coordinates are precomputed once so they can be reused across many satellite lookups.
 type ObserverPosition struct {
 	LatRad, LonRad, AltM float64 // geodetic (radians, meters above ellipsoid)
-	ECEFx, ECEFy, ECEFz float64 // precomputed ECEF (meters)
+	ECEFx, ECEFy, ECEFz  float64 // precomputed ECEF (meters)
 }
 
 // LookAngles holds azimuth, elevation, and range from observer to satellite.

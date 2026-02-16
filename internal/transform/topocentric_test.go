@@ -41,7 +41,7 @@ func TestECEFToLookAngles_DirectlyOverhead(t *testing.T) {
 	obs := NewObserverPosition(0, 0, 0)
 
 	// Satellite directly overhead: same lat/lon, higher altitude.
-	satAlt := 400000.0 // 400 km in meters
+	satAlt := 400000.0         // 400 km in meters
 	satX := obs.ECEFx + satAlt // straight up from equator/prime meridian
 	satY := obs.ECEFy
 	satZ := obs.ECEFz
