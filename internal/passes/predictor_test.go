@@ -2,6 +2,7 @@ package passes
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -180,6 +181,94 @@ func TestPredictInvalidTLE(t *testing.T) {
 	// Bad satellite should report per-satellite error.
 	if results[1].Error == "" {
 		t.Error("bad TLE should report error")
+	}
+}
+
+// parrish FL observer — the location that triggered the ground-track bug report.
+var parrishFLObserver = transform.NewObserverPosition(27.5867, -82.4251, 0)
+
+// haversineKm computes the great-circle distance (km) between two geodetic points.
+func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
+	const R = 6371.0
+	φ1 := lat1 * math.Pi / 180
+	φ2 := lat2 * math.Pi / 180
+	Δφ := (lat2 - lat1) * math.Pi / 180
+	Δλ := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(Δφ/2)*math.Sin(Δφ/2) + math.Cos(φ1)*math.Cos(φ2)*math.Sin(Δλ/2)*math.Sin(Δλ/2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return R * c
+}
+
+// maxGroundDistKm returns the maximum great-circle distance (km) between observer and
+// sub-satellite point, given observed elevation (degrees) and satellite altitude (meters).
+// Uses the geometry: ρ = acos(R·cos(ε)/(R+h)) − ε.
+func maxGroundDistKm(elevDeg, altM float64) float64 {
+	const R = 6371.0
+	h := altM / 1000.0
+	elevRad := elevDeg * math.Pi / 180
+	arg := R * math.Cos(elevRad) / (R + h)
+	if arg > 1 {
+		arg = 1
+	}
+	rho := math.Acos(arg) - elevRad
+	if rho < 0 {
+		rho = 0
+	}
+	return R * rho
+}
+
+// TestGroundTrackPhysicalConsistency verifies that each ground-track point's
+// geodetic lat/lon is physically consistent with its reported elevation angle.
+// A satellite at elevation ε and altitude h can be at most ρ = acos(R·cos(ε)/(R+h))−ε
+// radians (great-circle) from the observer — about 2200 km at the horizon for ISS.
+func TestGroundTrackPhysicalConsistency(t *testing.T) {
+	const obsLatDeg = 27.5867
+	const obsLonDeg = -82.4251
+
+	req := Request{
+		Observer:     parrishFLObserver,
+		Entries:      []tle.TLEEntry{issTLE},
+		Start:        time.Date(2025, 2, 14, 0, 0, 0, 0, time.UTC),
+		HorizonHours: 24,
+		MinElevation: 0,
+		MaxPasses:    20,
+	}
+
+	results := Predict(context.Background(), req)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	sat := results[0]
+	if sat.Error != "" {
+		t.Fatalf("satellite error: %s", sat.Error)
+	}
+	if len(sat.Passes) == 0 {
+		t.Fatal("no passes found over Parrish FL in 24h — check TLE epoch vs start time")
+	}
+
+	t.Logf("observer: %.4f°N, %.4f°W", obsLatDeg, -obsLonDeg)
+	t.Logf("found %d passes", len(sat.Passes))
+
+	for pi, p := range sat.Passes {
+		t.Logf("pass %d: maxEl=%.1f° dur=%.0fs groundTrack=%d pts",
+			pi, p.MaxElevation, p.DurationSeconds, len(p.GroundTrack))
+
+		for gi, gt := range p.GroundTrack {
+			dist := haversineKm(obsLatDeg, obsLonDeg, gt.Latitude, gt.Longitude)
+			maxPossible := maxGroundDistKm(gt.Elevation, gt.Altitude)
+
+			t.Logf("  gt[%d] t=%s el=%.1f° lat=%.4f lon=%.4f alt=%.0fm dist=%.0fkm maxPossible=%.0fkm",
+				gi, gt.Time.Format("15:04:05"),
+				gt.Elevation, gt.Latitude, gt.Longitude, gt.Altitude,
+				dist, maxPossible)
+
+			// A ground-track point at elevation el and altitude h cannot be more than
+			// maxGroundDistKm(el, h) from the observer. Allow 50% slack for rounding.
+			if maxPossible > 0 && dist > maxPossible*1.5 {
+				t.Errorf("pass %d gt[%d]: dist %.0fkm exceeds max physical %.0fkm (el=%.1f° alt=%.0fm)",
+					pi, gi, dist, maxPossible, gt.Elevation, gt.Altitude)
+			}
+		}
 	}
 }
 
