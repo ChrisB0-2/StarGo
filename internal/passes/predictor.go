@@ -18,6 +18,7 @@ type GroundTrackPoint struct {
 	Latitude  float64   `json:"latitude"`
 	Longitude float64   `json:"longitude"`
 	Altitude  float64   `json:"altitude"`
+	Elevation float64   `json:"elevation"` // degrees above observer's horizon (0-90)
 }
 
 // PassEvent describes a single satellite pass over an observer location.
@@ -201,6 +202,7 @@ func refinePas(ctx context.Context, prop *propagation.SGP4Propagator, obs transf
 					Latitude:  geo.LatDeg,
 					Longitude: geo.LonDeg,
 					Altitude:  geo.AltM,
+					Elevation: el,
 				})
 			}
 		}

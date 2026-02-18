@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,17 @@ type TLEConfig struct {
 	MaxFiles        int
 }
 
+// PassConfig holds pass prediction resource limits.
+type PassConfig struct {
+	MaxConcurrentJobs     int           // Global max concurrent pass prediction jobs (default: 4).
+	RequestTimeout        time.Duration // Max wall-clock time per request (default: 30s).
+	MaxComputeBudget      int64         // Max estimated propagation count per request (default: 500_000).
+	MaxSatsAllRequest     int           // Max satellites to process when norad_ids is null (default: 200).
+	TLEMaxAgeDays         float64       // Skip TLEs with epoch older than this many days (default: 7.0).
+	MaxOrbitalPeriodHours float64       // Skip satellites with period > this in hours (default: 2.0; 0 = disabled).
+	EnableSmartFiltering  bool          // Apply TLE-age and orbit-type pre-filter for all-satellite requests (default: true).
+}
+
 // Server holds the HTTP server and its dependencies.
 type Server struct {
 	httpServer *http.Server
@@ -42,7 +54,7 @@ type Server struct {
 
 // NewServer creates a configured HTTP server.
 // webFS provides the frontend static files. If nil, the frontend is not served.
-func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle.Store, tleCfg TLEConfig, prop *propagation.Propagator, kfCache *cache.KeyframeCache, streamHandler *stream.Handler, webFS fs.FS) *Server {
+func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle.Store, tleCfg TLEConfig, passCfg PassConfig, prop *propagation.Propagator, kfCache *cache.KeyframeCache, streamHandler *stream.Handler, webFS fs.FS) *Server {
 	mux := http.NewServeMux()
 
 	checker := health.NewChecker(store, tleCfg.MaxAge)
@@ -73,7 +85,7 @@ func NewServer(addr string, logger *slog.Logger, authCfg auth.Config, store *tle
 		mux.HandleFunc("GET /api/v1/stream/keyframes", streamHandler.HandleKeyframes)
 	}
 	mux.HandleFunc("GET /api/v1/propagate/{norad_id}", propagateSingleHandler(logger, store))
-	mux.HandleFunc("POST /api/v1/passes", passesHandler(logger, store))
+	mux.HandleFunc("POST /api/v1/passes", passesHandler(logger, store, passCfg))
 
 	// Serve web frontend (fallback for unmatched GET requests).
 	if webFS != nil {
@@ -615,8 +627,55 @@ func propagateSingleHandler(logger *slog.Logger, store *tle.Store) http.HandlerF
 	}
 }
 
+// meanMotionFromLine2 extracts the mean motion (revolutions/day) from TLE Line 2.
+// Mean motion occupies columns 53–63 (1-indexed), i.e., bytes [52:63] (0-indexed).
+func meanMotionFromLine2(line2 string) (float64, error) {
+	if len(line2) < 63 {
+		return 0, fmt.Errorf("line2 too short (%d chars)", len(line2))
+	}
+	s := strings.TrimSpace(line2[52:63])
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse mean motion %q: %w", s, err)
+	}
+	return v, nil
+}
+
+// filterSatellites removes entries whose TLE epoch is older than maxAgeDays
+// and whose orbital period exceeds maxPeriodHours (skipping GEO/MEO/HEO).
+// Set maxPeriodHours to 0 to disable the orbit-type filter.
+// Returns the filtered slice and the number of entries removed.
+func filterSatellites(entries []tle.TLEEntry, maxAgeDays, maxPeriodHours float64) ([]tle.TLEEntry, int) {
+	maxAge := time.Duration(maxAgeDays * float64(24*time.Hour))
+	now := time.Now()
+	filtered := make([]tle.TLEEntry, 0, len(entries))
+	skipped := 0
+	for _, e := range entries {
+		// Skip stale TLEs.
+		if now.Sub(e.Epoch) > maxAge {
+			skipped++
+			continue
+		}
+		// Skip non-LEO by orbital period.
+		if maxPeriodHours > 0 {
+			mm, err := meanMotionFromLine2(e.Line2)
+			if err == nil && mm > 0 && (24.0/mm) > maxPeriodHours {
+				skipped++
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered, skipped
+}
+
 // passesHandler returns a handler for POST /api/v1/passes.
-func passesHandler(logger *slog.Logger, store *tle.Store) http.HandlerFunc {
+// Enforces a per-request compute budget, global admission semaphore,
+// and context deadline to prevent CPU exhaustion.
+func passesHandler(logger *slog.Logger, store *tle.Store, passCfg PassConfig) http.HandlerFunc {
+	// Global semaphore shared across all /passes requests.
+	sem := make(chan struct{}, passCfg.MaxConcurrentJobs)
+
 	type passesRequest struct {
 		Latitude     float64 `json:"latitude"`
 		Longitude    float64 `json:"longitude"`
@@ -699,13 +758,31 @@ func passesHandler(logger *slog.Logger, store *tle.Store) http.HandlerFunc {
 			return
 		}
 
-		// Select satellite entries.
-		var entries []tle.TLEEntry
+		// Select and filter satellite entries.
+		totalSatellites := len(ds.Satellites)
+		var (
+			entries      []tle.TLEEntry
+			wasFiltered  bool
+			wasTruncated bool
+		)
 		if len(req.NORADIDs) == 0 {
-			// All satellites, capped at 200.
 			entries = ds.Satellites
-			if len(entries) > 200 {
-				entries = entries[:200]
+
+			// Smart pre-filter: remove stale TLEs and non-LEO satellites.
+			if passCfg.EnableSmartFiltering {
+				var skipped int
+				entries, skipped = filterSatellites(entries, passCfg.TLEMaxAgeDays, passCfg.MaxOrbitalPeriodHours)
+				wasFiltered = skipped > 0
+			}
+
+			// Cap total satellites processed in all-satellite mode.
+			maxSats := passCfg.MaxSatsAllRequest
+			if maxSats <= 0 {
+				maxSats = 200
+			}
+			if len(entries) > maxSats {
+				entries = entries[:maxSats]
+				wasTruncated = true
 			}
 		} else {
 			// Build index for fast lookup.
@@ -726,6 +803,54 @@ func passesHandler(logger *slog.Logger, store *tle.Store) http.HandlerFunc {
 			}
 		}
 
+		// Compute budget check: estimated coarse-scan propagation count.
+		// budget = satellites × (horizon_seconds / coarse_step_seconds)
+		const passCoarseStepSec = 30
+		budget := int64(len(entries)) * int64(req.HorizonHours*3600/passCoarseStepSec)
+		if budget > passCfg.MaxComputeBudget {
+			metrics.IncPassRejected("budget")
+			metrics.RecordPassRequest("400", time.Since(start), len(entries))
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error":      "compute budget exceeded",
+				"budget":     budget,
+				"max_budget": passCfg.MaxComputeBudget,
+				"hint":       "reduce satellites or horizon_hours",
+			})
+			return
+		}
+
+		// Create timeout context for both admission wait and prediction.
+		ctx, cancel := context.WithTimeout(r.Context(), passCfg.RequestTimeout)
+		defer cancel()
+
+		// Global admission control: acquire semaphore slot or timeout.
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		case <-ctx.Done():
+			metrics.IncPassRejected("admission")
+			metrics.RecordPassRequest("503", time.Since(start), len(entries))
+			logger.Warn("pass admission timeout",
+				"satellites", len(entries),
+				"budget", budget,
+				"remote_ip", r.RemoteAddr,
+			)
+			w.Header().Set("Retry-After", "5")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "server busy, try again later"})
+			return
+		}
+
+		metrics.IncPassJobsActive()
+		defer metrics.DecPassJobsActive()
+
+		// Extend write deadline to accommodate the full request timeout.
+		rc := http.NewResponseController(w)
+		if err := rc.SetWriteDeadline(time.Now().Add(passCfg.RequestTimeout + 5*time.Second)); err != nil {
+			logger.Debug("could not extend write deadline", "error", err)
+		}
+
 		obs := transform.NewObserverPosition(req.Latitude, req.Longitude, req.Altitude)
 
 		predReq := passes.Request{
@@ -737,14 +862,33 @@ func passesHandler(logger *slog.Logger, store *tle.Store) http.HandlerFunc {
 			MaxPasses:    req.MaxPasses,
 		}
 
-		results := passes.Predict(r.Context(), predReq)
+		results := passes.Predict(ctx, predReq)
+
+		timedOut := ctx.Err() != nil
+		if timedOut {
+			metrics.IncPassTimeout()
+		}
 
 		duration := time.Since(start)
 		metrics.RecordPassRequest("200", duration, len(entries))
 
+		if duration > 15*time.Second {
+			logger.Warn("slow pass prediction",
+				"duration_ms", duration.Milliseconds(),
+				"satellites", len(entries),
+				"budget", budget,
+				"remote_ip", r.RemoteAddr,
+			)
+		}
+
 		logger.Info("pass prediction",
 			"satellites", len(entries),
+			"budget", budget,
 			"duration_ms", duration.Milliseconds(),
+			"timed_out", timedOut,
+			"filtered", wasFiltered,
+			"truncated", wasTruncated,
+			"total_satellites", totalSatellites,
 			"remote_ip", r.RemoteAddr,
 		)
 
@@ -754,10 +898,15 @@ func passesHandler(logger *slog.Logger, store *tle.Store) http.HandlerFunc {
 				"longitude": req.Longitude,
 				"altitude":  req.Altitude,
 			},
-			"horizon_hours": req.HorizonHours,
-			"min_elevation": req.MinElevation,
-			"max_passes":    req.MaxPasses,
-			"satellites":    results,
+			"horizon_hours":    req.HorizonHours,
+			"min_elevation":    req.MinElevation,
+			"max_passes":       req.MaxPasses,
+			"timed_out":        timedOut,
+			"total_satellites": totalSatellites,
+			"computed":         len(entries),
+			"filtered":         wasFiltered,
+			"truncated":        wasTruncated,
+			"satellites":       results,
 		})
 	}
 }

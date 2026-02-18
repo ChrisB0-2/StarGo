@@ -88,6 +88,9 @@ func TestPredictISS(t *testing.T) {
 			if gt.Altitude < 100000 || gt.Altitude > 1000000 {
 				t.Errorf("pass %d gt %d: altitude %.0f m out of LEO range", i, j, gt.Altitude)
 			}
+			if gt.Elevation < 0 || gt.Elevation > 90 {
+				t.Errorf("pass %d gt %d: elevation %.2f out of range (0-90)", i, j, gt.Elevation)
+			}
 		}
 
 		t.Logf("pass %d: start=%v maxEl=%.1f° az=%.1f° dur=%.0fs groundTrack=%d pts",

@@ -235,6 +235,28 @@ var (
 			Buckets: []float64{1, 5, 10, 25, 50, 100},
 		},
 	)
+
+	passRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "stargo_pass_rejected_total",
+			Help: "Total pass requests rejected by reason.",
+		},
+		[]string{"reason"},
+	)
+
+	passTimeoutTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "stargo_pass_timeout_total",
+			Help: "Total pass requests that timed out.",
+		},
+	)
+
+	passJobsActive = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "stargo_pass_jobs_active",
+			Help: "Number of active pass prediction jobs.",
+		},
+	)
 )
 
 func init() {
@@ -267,6 +289,9 @@ func init() {
 	prometheus.MustRegister(passRequestsTotal)
 	prometheus.MustRegister(passDurationSeconds)
 	prometheus.MustRegister(passSatellitesPerRequest)
+	prometheus.MustRegister(passRejectedTotal)
+	prometheus.MustRegister(passTimeoutTotal)
+	prometheus.MustRegister(passJobsActive)
 }
 
 // Handler returns the Prometheus metrics HTTP handler.
@@ -397,6 +422,26 @@ func RecordPassRequest(status string, duration time.Duration, numSats int) {
 	passRequestsTotal.WithLabelValues(status).Inc()
 	passDurationSeconds.Observe(duration.Seconds())
 	passSatellitesPerRequest.Observe(float64(numSats))
+}
+
+// IncPassRejected increments the pass rejected counter for a given reason.
+func IncPassRejected(reason string) {
+	passRejectedTotal.WithLabelValues(reason).Inc()
+}
+
+// IncPassTimeout increments the pass timeout counter.
+func IncPassTimeout() {
+	passTimeoutTotal.Inc()
+}
+
+// IncPassJobsActive increments the active pass jobs gauge.
+func IncPassJobsActive() {
+	passJobsActive.Inc()
+}
+
+// DecPassJobsActive decrements the active pass jobs gauge.
+func DecPassJobsActive() {
+	passJobsActive.Dec()
 }
 
 // responseWriter wraps http.ResponseWriter to capture the status code.

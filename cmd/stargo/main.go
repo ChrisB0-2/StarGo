@@ -88,7 +88,8 @@ func main() {
 	streamCfg := loadStreamConfig(logger)
 	streamHandler := stream.NewHandler(kfCache, store, streamCfg, logger)
 
-	srv := api.NewServer(addr, logger, authCfg, store, tleCfg, prop, kfCache, streamHandler, web.Content)
+	passCfg := loadPassConfig(logger)
+	srv := api.NewServer(addr, logger, authCfg, store, tleCfg, passCfg, prop, kfCache, streamHandler, web.Content)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -294,6 +295,93 @@ func loadStreamConfig(logger *slog.Logger) stream.Config {
 		"max_concurrent_per_ip", cfg.MaxConcurrentPerIP,
 		"bandwidth_limit", cfg.BandwidthLimit,
 		"keepalive_interval_seconds", cfg.KeepaliveInterval.Seconds(),
+	)
+
+	return cfg
+}
+
+func loadPassConfig(logger *slog.Logger) api.PassConfig {
+	cfg := api.PassConfig{
+		MaxConcurrentJobs:     4,
+		RequestTimeout:        30 * time.Second,
+		MaxComputeBudget:      5_000_000,
+		MaxSatsAllRequest:     200,
+		TLEMaxAgeDays:         7.0,
+		MaxOrbitalPeriodHours: 2.0,
+		EnableSmartFiltering:  true,
+	}
+
+	if v := os.Getenv("STARGO_PASS_MAX_CONCURRENT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_PASS_MAX_CONCURRENT value, using default", "value", v, "default", 4)
+		} else {
+			cfg.MaxConcurrentJobs = n
+		}
+	}
+
+	if v := os.Getenv("STARGO_PASS_TIMEOUT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_PASS_TIMEOUT value, using default", "value", v, "default", 30)
+		} else {
+			cfg.RequestTimeout = time.Duration(n) * time.Second
+		}
+	}
+
+	if v := os.Getenv("STARGO_PASS_MAX_BUDGET"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_PASS_MAX_BUDGET value, using default", "value", v, "default", 5_000_000)
+		} else {
+			cfg.MaxComputeBudget = int64(n)
+		}
+	}
+
+	if v := os.Getenv("STARGO_PASS_MAX_SATS_ALL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			logger.Warn("invalid STARGO_PASS_MAX_SATS_ALL value, using default", "value", v, "default", 200)
+		} else {
+			cfg.MaxSatsAllRequest = n
+		}
+	}
+
+	if v := os.Getenv("STARGO_PASS_TLE_MAX_AGE_DAYS"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f <= 0 {
+			logger.Warn("invalid STARGO_PASS_TLE_MAX_AGE_DAYS value, using default", "value", v, "default", 7.0)
+		} else {
+			cfg.TLEMaxAgeDays = f
+		}
+	}
+
+	if v := os.Getenv("STARGO_PASS_MAX_PERIOD_HOURS"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil || f < 0 {
+			logger.Warn("invalid STARGO_PASS_MAX_PERIOD_HOURS value, using default", "value", v, "default", 2.0)
+		} else {
+			cfg.MaxOrbitalPeriodHours = f
+		}
+	}
+
+	if v := os.Getenv("STARGO_PASS_SMART_FILTER"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			logger.Warn("invalid STARGO_PASS_SMART_FILTER value, using default", "value", v, "default", true)
+		} else {
+			cfg.EnableSmartFiltering = enabled
+		}
+	}
+
+	logger.Info("pass config",
+		"max_concurrent_jobs", cfg.MaxConcurrentJobs,
+		"request_timeout_seconds", cfg.RequestTimeout.Seconds(),
+		"max_compute_budget", cfg.MaxComputeBudget,
+		"max_sats_all_request", cfg.MaxSatsAllRequest,
+		"tle_max_age_days", cfg.TLEMaxAgeDays,
+		"max_orbital_period_hours", cfg.MaxOrbitalPeriodHours,
+		"smart_filtering", cfg.EnableSmartFiltering,
 	)
 
 	return cfg
